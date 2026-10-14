@@ -77,7 +77,7 @@ namespace FactuSmart.Tests
             {
                 ApiKey = "k_prueba",
                 BaseUrl = Base + "/",
-                Ruc = "20123456789",
+                Ruc = "20100070970",
                 HttpClient = new HttpClient(manejador),
                 Dormir = (t, ct) => { esperas.Add(t); return Task.CompletedTask; },
             });

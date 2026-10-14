@@ -11,16 +11,22 @@ IGV y los totales, consulta los catálogos SUNAT, y descarga el PDF, el XML firm
 
 ## Instalar
 
+Pronto en NuGet. Mientras tanto, descarga `FactuSmart.0.1.0.nupkg` desde la release
+[v0.1.0 en GitHub](https://github.com/factusmart/factusmart-dotnet/releases/tag/v0.1.0), guárdalo en una
+carpeta (por ejemplo `C:\paquetes`) e instálalo desde ahí:
+
 ```bash
-dotnet add package FactuSmart
+dotnet add package FactuSmart --version 0.1.0 --source C:\paquetes
 ```
+
+`--source` es la carpeta donde guardaste el `.nupkg`, no el archivo.
 
 ## Ejemplo en 10 líneas
 
 ```csharp
 using FactuSmart;
 
-var fs = new FactuSmartClient(new FactuSmartOptions { ApiKey = "TU_API_KEY", BaseUrl = "https://TU_URL_BASE/api/v1/issuer", Ruc = "20123456789" });
+var fs = new FactuSmartClient(new FactuSmartOptions { ApiKey = "TU_API_KEY", BaseUrl = "https://TU_URL_BASE/api/v1/issuer", Ruc = "20100070970" });
 
 var calc = FactuSmartClient.CalcularComprobante(new[] {
     new { descripcion = "Servicio de consultoría", cantidad = 1, valor_unitario = 100m, afectacion = "10" },
@@ -28,7 +34,7 @@ var calc = FactuSmartClient.CalcularComprobante(new[] {
 
 var r = await fs.Comprobantes.EmitirAsync(new {
     codigo_tipo_documento = "01",
-    datos_del_cliente_o_receptor = new { codigo_tipo_documento_identidad = "6", numero_documento = "20555555555" },
+    datos_del_cliente_o_receptor = new { codigo_tipo_documento_identidad = "6", numero_documento = "20131312955" },
     items = calc.Items, totales = calc.Totales,
 });
 
@@ -270,7 +276,7 @@ try
     await fs.Comprobantes.EmitirAsync(datos);
 }
 catch (ErrorDeValidacion e) { Console.WriteLine($"Corrige el JSON: {e.Mensaje}"); }
-catch (SinCreditos) { Console.WriteLine("Recarga créditos"); }
+catch (SinCreditos) { Console.WriteLine("Sube de plan o pide créditos extra para tu plan"); }
 catch (FactuSmartException e) when (e.Codigo == "PLAN_VENCIDO") { Console.WriteLine("Renueva tu plan"); }
 ```
 

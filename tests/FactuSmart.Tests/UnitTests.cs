@@ -56,12 +56,12 @@ namespace FactuSmart.Tests
         [Fact]
         public async Task Get_manda_X_API_Key_y_ruc_en_query()
         {
-            var (c, m, _) = Cliente(R(200, new { success = true, ruc_emisor = "20123456789" }));
+            var (c, m, _) = Cliente(R(200, new { success = true, ruc_emisor = "20100070970" }));
             var r = await c.PingAsync();
             Assert.True(r.GetProperty("success").GetBoolean());
             var l = m.Llamadas.Single();
             Assert.Equal("GET", l.Metodo);
-            Assert.Equal(Base + "/ping?ruc=20123456789", l.Url.ToString());
+            Assert.Equal(Base + "/ping?ruc=20100070970", l.Url.ToString());
             Assert.Equal("k_prueba", l.Cabeceras["X-API-Key"]);
             Assert.StartsWith("factusmart-dotnet/", l.Cabeceras["User-Agent"]);
         }
@@ -83,7 +83,7 @@ namespace FactuSmart.Tests
             Assert.Equal("POST", l.Metodo);
             Assert.Equal(Base + "/documents", l.Url.ToString());
             var b = l.Cuerpo!.Value;
-            Assert.Equal("20123456789", b.Str("ruc"));
+            Assert.Equal("20100070970", b.Str("ruc"));
             Assert.Equal("#", b.Str("numero_documento"));
             Assert.Equal("PEN", b.Str("codigo_tipo_moneda"));
             Assert.Equal("0101", b.Str("codigo_tipo_operacion"));
@@ -130,12 +130,12 @@ namespace FactuSmart.Tests
         {
             var (c, m, _) = Cliente(R(200), R(200), R(200));
             await c.Rucs.ListarAsync();
-            await c.Rucs.CrearAsync(new { ruc = "20555555555", empresa = "X", correo = "a@b.pe", clave = "123456" });
-            await c.Rucs.ActivarAsync("20555555555", false);
+            await c.Rucs.CrearAsync(new { ruc = "20131312955", empresa = "X", correo = "a@b.pe", clave = "123456" });
+            await c.Rucs.ActivarAsync("20131312955", false);
             Assert.Equal(Base + "/rucs", m.Llamadas[0].Url.ToString());
-            Assert.False(m.Llamadas[1].Cuerpo!.Value.GetProperty("ruc").GetString() == "20123456789");
+            Assert.False(m.Llamadas[1].Cuerpo!.Value.GetProperty("ruc").GetString() == "20100070970");
             Assert.Equal("PATCH", m.Llamadas[2].Metodo);
-            Assert.Equal(Base + "/rucs/20555555555/activation", m.Llamadas[2].Url.ToString());
+            Assert.Equal(Base + "/rucs/20131312955/activation", m.Llamadas[2].Url.ToString());
             Assert.False(m.Llamadas[2].Cuerpo!.Value.GetProperty("activo").GetBoolean());
             Assert.False(m.Llamadas[2].Cuerpo!.Value.TryGetProperty("ruc", out _));
         }
@@ -146,8 +146,8 @@ namespace FactuSmart.Tests
             var (c, m, _) = Cliente(R(200), R(200));
             await c.Comprobantes.ListarAsync(new { estado = "05", limite = 2, antes_de = (string?)null });
             await c.Catalogos.ConsultarAsync("unidades", new OpcionesCatalogo { Q = "kilo" });
-            Assert.Equal(Base + "/documents?estado=05&limite=2&ruc=20123456789", m.Llamadas[0].Url.ToString());
-            Assert.Equal(Base + "/catalogos/unidades?q=kilo&ruc=20123456789", m.Llamadas[1].Url.ToString());
+            Assert.Equal(Base + "/documents?estado=05&limite=2&ruc=20100070970", m.Llamadas[0].Url.ToString());
+            Assert.Equal(Base + "/catalogos/unidades?q=kilo&ruc=20100070970", m.Llamadas[1].Url.ToString());
         }
 
         [Fact]
@@ -170,7 +170,7 @@ namespace FactuSmart.Tests
             await c.Comprobantes.ReenviarAsync("abc-1");
             await c.Comprobantes.ConsultarSunatAsync("abc-1");
             Assert.Equal(Base + "/documents/abc-1/reenviar", m.Llamadas[0].Url.ToString());
-            Assert.Equal("20123456789", m.Llamadas[0].Cuerpo!.Value.Str("ruc"));
+            Assert.Equal("20100070970", m.Llamadas[0].Cuerpo!.Value.Str("ruc"));
             Assert.Equal(Base + "/documents/abc-1/consultar-sunat", m.Llamadas[1].Url.ToString());
         }
 
@@ -181,7 +181,7 @@ namespace FactuSmart.Tests
             var (c, m, _) = Cliente(new RespuestaFalsa { Bytes = pdf });
             var r = await c.Comprobantes.DescargarAsync("abc", "pdf");
             Assert.Equal(pdf, r);
-            Assert.Equal(Base + "/documents/abc/pdf?ruc=20123456789", m.Llamadas[0].Url.ToString());
+            Assert.Equal(Base + "/documents/abc/pdf?ruc=20100070970", m.Llamadas[0].Url.ToString());
             await Assert.ThrowsAsync<FactuSmartException>(() => c.Comprobantes.DescargarAsync("abc", "zip"));
             await Assert.ThrowsAsync<FactuSmartException>(() => c.Comprobantes.ConsultarAsync(" "));
         }
@@ -311,7 +311,7 @@ namespace FactuSmart.Tests
             await Assert.ThrowsAnyAsync<FactuSmartException>(() => c.Comprobantes.ConsultarSunatAsync("a"));
             await Assert.ThrowsAnyAsync<FactuSmartException>(() => c.Anulaciones.CrearAsync(new { documentos = new object[0] }));
             await Assert.ThrowsAnyAsync<FactuSmartException>(() => c.Guias.EmitirAsync(new { codigo_tipo_documento = "09" }));
-            await Assert.ThrowsAnyAsync<FactuSmartException>(() => c.Rucs.ActivarAsync("20555555555", true));
+            await Assert.ThrowsAnyAsync<FactuSmartException>(() => c.Rucs.ActivarAsync("20131312955", true));
             Assert.Equal(5, m.Llamadas.Count);
         }
 
@@ -426,7 +426,7 @@ namespace FactuSmart.Tests
             });
             var r = await fs.Comprobantes.EmitirAsync(new {
                 codigo_tipo_documento = "01",
-                datos_del_cliente_o_receptor = new { codigo_tipo_documento_identidad = "6", numero_documento = "20555555555" },
+                datos_del_cliente_o_receptor = new { codigo_tipo_documento_identidad = "6", numero_documento = "20131312955" },
                 items = calc.Items, totales = calc.Totales,
             });
             Assert.Equal("True F001-1", $"{r.GetProperty("aceptado_por_sunat")} {r.GetProperty("serie_numero")}");
@@ -454,7 +454,7 @@ namespace FactuSmart.Tests
             Assert.Equal(JsonValueKind.Array, r.GetProperty("establecimientos").ValueKind);
             await c.Establecimientos.ListarAsync(new OpcionesRuc { Ruc = "20999999999" });
             Assert.Equal("GET", m.Llamadas[0].Metodo);
-            Assert.Equal(Base + "/establecimientos?ruc=20123456789", m.Llamadas[0].Url.ToString());
+            Assert.Equal(Base + "/establecimientos?ruc=20100070970", m.Llamadas[0].Url.ToString());
             Assert.Null(m.Llamadas[0].Cuerpo);
             Assert.Equal(Base + "/establecimientos?ruc=20999999999", m.Llamadas[1].Url.ToString());
         }
@@ -482,7 +482,7 @@ namespace FactuSmart.Tests
             Assert.Equal(Base + "/establecimientos", l.Url.ToString());
             Assert.Equal("", l.Url.Query);
             var b = l.Cuerpo!.Value;
-            Assert.Equal("20123456789", b.Str("ruc"));
+            Assert.Equal("20100070970", b.Str("ruc"));
             Assert.Equal("0001", b.Str("codigo_anexo"));
             Assert.Equal("Tienda Miraflores", b.Str("nombre"));
             Assert.Equal("150122", b.Str("ubigeo"));
@@ -534,7 +534,7 @@ namespace FactuSmart.Tests
             Assert.Equal("/api/v1/issuer/catalogos/productos-sunat", u.AbsolutePath);
             Assert.Contains("q=computador%20port%C3%A1til", u.Query);
             Assert.Contains("limite=5", u.Query);
-            Assert.Contains("ruc=20123456789", u.Query);
+            Assert.Contains("ruc=20100070970", u.Query);
         }
 
         [Fact]
@@ -574,7 +574,7 @@ namespace FactuSmart.Tests
             Assert.Equal("GET", l.Metodo);
             Assert.Equal("/api/v1/issuer/documents/abc/pdf", l.Url.AbsolutePath);
             Assert.Contains("formato=ticket", l.Url.Query);
-            Assert.Contains("ruc=20123456789", l.Url.Query);
+            Assert.Contains("ruc=20100070970", l.Url.Query);
         }
 
         [Fact]
