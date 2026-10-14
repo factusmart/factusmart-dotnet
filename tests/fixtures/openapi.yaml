@@ -237,7 +237,7 @@ info:
 
     - Los errores del payload de emisión (`/documents`, `/anulaciones`, `/guias`) devuelven
       `422` con `codigo: DATOS_INVALIDOS` y el detalle en `message`.
-    - `POST /calcular` y `GET /catalogos/{nombre}` devuelven `422 DATOS_INVALIDOS` con el detalle
+    - `POST /calcular`, `GET /catalogos/{nombre}` y `GET /catalogos/productos-sunat` devuelven `422 DATOS_INVALIDOS` con el detalle
       por campo en `campos` (ej. `{"items.0.cantidad": ["cantidad debe ser un número mayor que 0."]}`).
     - Los endpoints con validación por campo (`GET /documents`, `POST /rucs`, `PATCH /rucs/{ruc}/activation`)
       devuelven `422` con `codigo: DATOS_INVALIDOS` y el mapa `{"campo": ["mensaje"]}` en `campos`.
@@ -1779,8 +1779,10 @@ paths:
         | `tipos-operacion` | 51 | Tipos de operación | `es_exportacion` |
         | `detracciones` | 54 | Bienes y servicios sujetos a detracción | `porcentaje` |
 
-        El código de producto SUNAT (UNSPSC, catálogo 25) no está: envía el código de 8 dígitos en
-        `codigo_producto_sunat` del ítem si lo necesitas.
+        | `productos-sunat` | 25 | Código de producto SUNAT (UNSPSC v14, ~53 mil códigos) | — |
+
+        El catálogo 25 no se lista entero: búscalo con `GET /catalogos/productos-sunat?q=` (ver
+        [Buscar el código de producto SUNAT](#operation/searchSunatProductCodes)).
 
         Acepta `?ruc=` / `X-RUC` como el resto de endpoints, pero la lista es la misma para todos los
         RUC: el RUC solo cambia las filas de `GET /catalogos/{nombre}`. Si lo mandas, debe ser de tu
@@ -1801,7 +1803,8 @@ paths:
                   - { nombre: tipos-documento, catalogo_sunat: "01", descripcion: Tipos de comprobante, url: /api/v1/issuer/catalogos/tipos-documento }
                   - { nombre: monedas, catalogo_sunat: "02", descripcion: Monedas, url: /api/v1/issuer/catalogos/monedas }
                   - { nombre: unidades, catalogo_sunat: "03", descripcion: Unidades de medida, url: /api/v1/issuer/catalogos/unidades }
-                nota: 'Código de producto SUNAT (UNSPSC, catálogo 25): el sistema no tiene esa tabla; envía el código de 8 dígitos en "codigo_producto_sunat" del ítem si lo necesitas.'
+                  - { nombre: productos-sunat, catalogo_sunat: "25", descripcion: 'Código de producto SUNAT (UNSPSC v14) — buscador: ?q=texto o código, ?limite= (máx. 50)', url: /api/v1/issuer/catalogos/productos-sunat }
+                nota: 'Código de producto SUNAT (UNSPSC, catálogo 25): búscalo con GET /api/v1/issuer/catalogos/productos-sunat?q=texto|codigo y envíalo en "codigo_producto_sunat" del ítem.'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '402':
@@ -1815,6 +1818,119 @@ paths:
           $ref: '#/components/responses/RateLimited'
         '500':
           $ref: '#/components/responses/ServerErrorOrRateLimit'
+
+  /catalogos/productos-sunat:
+    get:
+      operationId: searchSunatProductCodes
+      tags: [Herramientas]
+      summary: Buscar el código de producto SUNAT
+      description: |
+        Buscador del **código de producto SUNAT** (catálogo 25 = UNSPSC v14, 8 dígitos): el valor que
+        va en `codigo_producto_sunat` de cada ítem. No consume crédito y **no necesita RUC** (el
+        catálogo es el mismo para todos; si mandas `?ruc=` se ignora).
+
+        - `?q=` con **dígitos** busca por código: exacto o prefijo de 2 a 8 dígitos (`4321` lista esa
+          familia). Primero va el código exacto, luego el resto en orden.
+        - `?q=` con **texto** (mínimo 3 letras) busca todas las palabras en la descripción y la
+          categoría, sin importar tildes ni mayúsculas. Primero los productos (nivel 4, el que va en
+          el comprobante) cuya propia descripción contiene la frase, los más cortos primero.
+        - `hay_mas: true` = hay más resultados que `limite`: afina la búsqueda o sube `limite`.
+
+        **Es opcional en factura y boleta**: SUNAT no lo exige para emitirlas. Envíalo solo si tu
+        caso lo requiere; si lo envías, usa un código de nivel `producto`.
+
+        Fuente: el Excel oficial de SUNAT (`CCNU_MOD_2.xlsm`, hoja "Bienes y Servicios") publicado en
+        <https://cpe.sunat.gob.pe/informacion_general/codigoproducto>. Resultados en caché 6 horas.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          description: Código (2 a 8 dígitos, exacto o prefijo) o texto (3 a 100 caracteres).
+          schema: { type: string, minLength: 2, maxLength: 100 }
+          example: computador
+        - name: limite
+          in: query
+          required: false
+          description: Máximo de resultados (1 a 50).
+          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+          example: 3
+        - name: nivel
+          in: query
+          required: false
+          description: Filtra por nivel de la jerarquía UNSPSC. Para el comprobante usa `producto`.
+          schema:
+            type: string
+            enum: [segmento, familia, clase, producto]
+      responses:
+        '200':
+          description: Códigos encontrados (`datos` puede venir vacío si no hay coincidencias).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SunatProductSearchResponse'
+              examples:
+                texto:
+                  summary: GET /catalogos/productos-sunat?q=computador&limite=3
+                  value:
+                    success: true
+                    catalogo: productos-sunat
+                    catalogo_sunat: "25"
+                    descripcion: 'Código de producto SUNAT (UNSPSC v14). Va en "codigo_producto_sunat" de cada ítem.'
+                    q: computador
+                    total: 3
+                    hay_mas: true
+                    datos:
+                      - { codigo: "43211516", descripcion: Minicomputadores, nivel: producto, categoria: 'Difusión de Tecnologías de Información y Telecomunicaciones > Equipo informático y accesorios > Computadores' }
+                      - { codigo: "43202222", descripcion: Cables de computador, nivel: producto, categoria: 'Difusión de Tecnologías de Información y Telecomunicaciones > Componentes para tecnología de la información, difusión o telecomunicaciones > Subconjuntos para dispositivos electrónicos' }
+                      - { codigo: "43211503", descripcion: Computadores notebook, nivel: producto, categoria: 'Difusión de Tecnologías de Información y Telecomunicaciones > Equipo informático y accesorios > Computadores' }
+                codigo:
+                  summary: GET /catalogos/productos-sunat?q=432115&limite=2
+                  value:
+                    success: true
+                    catalogo: productos-sunat
+                    catalogo_sunat: "25"
+                    descripcion: 'Código de producto SUNAT (UNSPSC v14). Va en "codigo_producto_sunat" de cada ítem.'
+                    q: "432115"
+                    total: 2
+                    hay_mas: true
+                    datos:
+                      - { codigo: "43211500", descripcion: Computadores, nivel: clase, categoria: 'Difusión de Tecnologías de Información y Telecomunicaciones > Equipo informático y accesorios' }
+                      - { codigo: "43211501", descripcion: Servidores de computador, nivel: producto, categoria: 'Difusión de Tecnologías de Información y Telecomunicaciones > Equipo informático y accesorios > Computadores' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          description: |
+            Parámetros inválidos (`DATOS_INVALIDOS`, detalle en `campos`): falta `q`, código de menos
+            de 2 o más de 8 dígitos, texto de menos de 3 letras o más de 100 caracteres, `limite`
+            fuera de 1..50, o `nivel` desconocido.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                campos: { q: ['Escribe al menos 3 letras para buscar por texto.'] }
+                success: false
+                message: 'Datos inválidos: Escribe al menos 3 letras para buscar por texto.'
+                codigo: DATOS_INVALIDOS
+                reintentable: false
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/ServerErrorOrRateLimit'
+        '503':
+          description: |
+            El catálogo todavía no está cargado en este servidor (`CATALOGO_NO_DISPONIBLE`).
+            Reintentar no lo arregla: mientras tanto envía el código de 8 dígitos en
+            `codigo_producto_sunat` (es opcional para SUNAT) o emite sin él.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                success: false
+                message: 'El catálogo de códigos de producto SUNAT todavía no está cargado en este servidor. Mientras tanto, envía el código de 8 dígitos en "codigo_producto_sunat" (es opcional para SUNAT).'
+                codigo: CATALOGO_NO_DISPONIBLE
+                reintentable: false
 
   /catalogos/{nombre}:
     get:
@@ -2669,7 +2785,13 @@ components:
         nombre: { type: string }
         nombre_secundario: { type: string }
         codigo_tipo_item: { type: string, default: "01" }
-        codigo_producto_sunat: { type: string }
+        codigo_producto_sunat:
+          type: string
+          description: |
+            Código de producto SUNAT (catálogo 25, UNSPSC, 8 dígitos). Búscalo con
+            [`GET /catalogos/productos-sunat`](#operation/searchSunatProductCodes). Opcional: SUNAT
+            no lo exige en factura ni boleta.
+          example: "43211503"
         unidad_de_medida: { type: string, description: 'Catálogo 03: `NIU` para bienes/productos, `ZZ` para servicios (`KGM`, `LTR`... si vendes por peso o volumen). Lista completa: `GET /catalogos/03`.' }
         cantidad: { type: number }
         valor_unitario: { type: number, description: 'Precio unitario sin IGV.' }
@@ -3142,7 +3264,13 @@ components:
         descripcion: { type: string }
         nombre: { type: string }
         codigo_tipo_item: { type: string, default: "01" }
-        codigo_producto_sunat: { type: string }
+        codigo_producto_sunat:
+          type: string
+          description: |
+            Código de producto SUNAT (catálogo 25, UNSPSC, 8 dígitos). Búscalo con
+            [`GET /catalogos/productos-sunat`](#operation/searchSunatProductCodes). Opcional: SUNAT
+            no lo exige en factura ni boleta.
+          example: "43211503"
         unidad_de_medida: { type: string }
         cantidad: { type: number }
         informacion_adicional: { type: string }
@@ -3262,6 +3390,29 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/CatalogRow'
+    SunatProductSearchResponse:
+      type: object
+      required: [success, catalogo, catalogo_sunat, descripcion, q, total, hay_mas, datos]
+      properties:
+        success: { type: boolean, const: true }
+        catalogo: { type: string, const: productos-sunat }
+        catalogo_sunat: { type: string, const: "25" }
+        descripcion: { type: string }
+        q: { type: string, description: La búsqueda tal como se recibió. }
+        total: { type: integer, description: 'Filas devueltas en `datos` (como mucho `limite`).' }
+        hay_mas: { type: boolean, description: 'true si hay más resultados que `limite`.' }
+        datos:
+          type: array
+          items:
+            type: object
+            required: [codigo, descripcion, nivel, categoria]
+            properties:
+              codigo: { type: string, description: 'Código UNSPSC de 8 dígitos. El de nivel `producto` es el que va en `codigo_producto_sunat`.', examples: ["43211503"] }
+              descripcion: { type: string, examples: [Computadores notebook] }
+              nivel:
+                type: string
+                enum: [segmento, familia, clase, producto]
+              categoria: { type: [string, "null"], description: 'Ruta en la jerarquía (segmento > familia > clase).' }
     CatalogRow:
       type: object
       required: [codigo, descripcion, activo]
