@@ -243,13 +243,15 @@ namespace FactuSmart
         /// prefijo, o por texto (sin tildes). <paramref name="limite"/> máx. 50. Respuesta: <c>total</c>,
         /// <c>hay_mas</c> y <c>datos</c> (<c>codigo</c>, <c>descripcion</c>…). Se reintenta como un GET.
         /// </summary>
-        public async Task<JsonElement> BuscarProductoSunatAsync(string q, int? limite = null, OpcionesRuc? opciones = null, CancellationToken cancellationToken = default)
+        public async Task<JsonElement> BuscarProductoSunatAsync(string q, int? limite = null, string? nivel = null, OpcionesRuc? opciones = null, CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(q))
                 throw new FactuSmartException("Catalogos.BuscarProductoSunatAsync(q): pasa un texto (ej. \"computador\") o un código (ej. \"4321\").");
             var p = new FactuSmartClient.Peticion("GET", "/catalogos/productos-sunat") { Reintentable = true };
             p.Query["q"] = q.Trim();
             p.Query["limite"] = limite?.ToString(CultureInfo.InvariantCulture);
+            // segmento | familia | clase | producto. Sin nivel no se manda.
+            p.Query["nivel"] = string.IsNullOrWhiteSpace(nivel) ? null : nivel.Trim();
             p.Query["ruc"] = _c.RucDe(opciones);
             return await _c.JsonAsync(p, cancellationToken).ConfigureAwait(false);
         }

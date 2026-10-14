@@ -102,7 +102,7 @@ Todos devuelven `Task<JsonElement>` (salvo `DescargarAsync`) y aceptan un `Cance
 | `fs.Anulaciones.EstadoAsync(ticket, opciones?)` | `GET /anulaciones/{ticket}/status` | objeto (`tipo`, `estado`, `documentos`) |
 | `fs.Catalogos.ListarAsync(opciones?)` | `GET /catalogos` | objeto (`catalogos`, `nota`) |
 | `fs.Catalogos.ConsultarAsync(nombre, new OpcionesCatalogo { Q, Ruc }?)` | `GET /catalogos/{nombre}` | objeto (`catalogo`, `total`, `datos`) |
-| `fs.Catalogos.BuscarProductoSunatAsync(q, limite: 10?, opciones?)` | `GET /catalogos/productos-sunat` | objeto (`total`, `hay_mas`, `datos`) |
+| `fs.Catalogos.BuscarProductoSunatAsync(q, limite: 10?, nivel: "producto"?, opciones?)` | `GET /catalogos/productos-sunat` | objeto (`total`, `hay_mas`, `datos`) |
 | `fs.Establecimientos.ListarAsync(opciones?)` | `GET /establecimientos` | objeto (`establecimientos`) |
 | `fs.Establecimientos.CrearAsync(datos, opciones?)` | `POST /establecimientos` | objeto (`message`, `establecimiento`) |
 | `fs.Guias.EmitirAsync(datos, opciones?)` | `POST /guias` | objeto (revisa `enviado`) |
@@ -176,7 +176,7 @@ Usa solo las filas activas: el RUC valida contra ellas. Un nombre que no existe 
 **Código de producto SUNAT** (catálogo 25), por texto (sin tildes) o por código exacto/prefijo:
 
 ```csharp
-var r = await fs.Catalogos.BuscarProductoSunatAsync("computador", limite: 10); // máx. 50
+var r = await fs.Catalogos.BuscarProductoSunatAsync("computador", limite: 10, nivel: "producto"); // máx. 50; nivel: segmento|familia|clase|producto
 foreach (var f in r.GetProperty("datos").EnumerateArray())
     Console.WriteLine($"{f.GetProperty("codigo")} {f.GetProperty("descripcion")}"); // 43211503 ...
 // r.GetProperty("hay_mas") == true → afina la búsqueda

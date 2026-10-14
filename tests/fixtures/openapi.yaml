@@ -884,7 +884,7 @@ paths:
                 $ref: '#/components/schemas/Error'
               examples:
                 pdfNoGenerado:
-                  value: { success: false, message: 'No se pudo generar el PDF en formato ticket_58. Vuelve a intentar en unos segundos.', codigo: PDF_NO_GENERADO, reintentable: true }
+                  value: { success: false, message: 'No se pudo generar el PDF en formato ticket58. Vuelve a intentar en unos segundos.', codigo: PDF_NO_GENERADO, reintentable: true }
                 interno:
                   value: { success: false, message: 'Ocurrió un error interno. Intenta de nuevo en unos segundos.', codigo: ERROR_INTERNO, reintentable: true }
 
@@ -1834,7 +1834,7 @@ paths:
         - `?q=` con **texto** (mínimo 3 letras) busca todas las palabras en la descripción y la
           categoría, sin importar tildes ni mayúsculas. Primero los productos (nivel 4, el que va en
           el comprobante) cuya propia descripción contiene la frase, los más cortos primero.
-        - `hay_mas: true` = hay más resultados que `limite`: afina la búsqueda o sube `limite`.
+        - `total` = cuántos resultados vienen en esta respuesta (no el total de coincidencias). `hay_mas: true` = hay más resultados que `limite`: afina la búsqueda o sube `limite`.
 
         **Es opcional en factura y boleta**: SUNAT no lo exige para emitirlas. Envíalo solo si tu
         caso lo requiere; si lo envías, usa un código de nivel `producto`.
@@ -1906,7 +1906,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Error'
+                $ref: '#/components/schemas/ToolValidationError'
               example:
                 campos: { q: ['Escribe al menos 3 letras para buscar por texto.'] }
                 success: false

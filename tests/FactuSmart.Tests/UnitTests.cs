@@ -548,6 +548,20 @@ namespace FactuSmart.Tests
             Assert.Single(m.Llamadas);
         }
 
+        [Fact]
+        public async Task BuscarProductoSunat_nivel_va_en_query_solo_si_se_pasa()
+        {
+            var (c, m, _) = Cliente(R(200), R(200), R(200));
+            await c.Catalogos.BuscarProductoSunatAsync("computador", nivel: "producto");
+            await c.Catalogos.BuscarProductoSunatAsync("43", limite: 10, nivel: "familia", opciones: new OpcionesRuc { Ruc = "20999999999" });
+            await c.Catalogos.BuscarProductoSunatAsync("computador", nivel: " ");
+            Assert.Contains("nivel=producto", m.Llamadas[0].Url.Query);
+            Assert.Contains("nivel=familia", m.Llamadas[1].Url.Query);
+            Assert.Contains("limite=10", m.Llamadas[1].Url.Query);
+            Assert.Contains("ruc=20999999999", m.Llamadas[1].Url.Query);
+            Assert.DoesNotContain("nivel", m.Llamadas[2].Url.Query);
+        }
+
         // ───── Descargar con formato ─────
 
         [Fact]
