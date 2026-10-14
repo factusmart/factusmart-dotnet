@@ -1,0 +1,209 @@
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace FactuSmart
+{
+    /// <summary><c>cliente.Cuenta</c>.</summary>
+    public sealed class RecursoCuenta
+    {
+        private readonly FactuSmartClient _c;
+        internal RecursoCuenta(FactuSmartClient c) { _c = c; }
+
+        /// <summary>GET /account — saldo (<c>creditos_disponibles</c>), plan y RUCs.</summary>
+        public Task<JsonElement> SaldoAsync(CancellationToken cancellationToken = default)
+            => _c.JsonAsync(new FactuSmartClient.Peticion("GET", "/account") { Reintentable = true }, cancellationToken);
+    }
+
+    /// <summary><c>cliente.Series</c>.</summary>
+    public sealed class RecursoSeries
+    {
+        private readonly FactuSmartClient _c;
+        internal RecursoSeries(FactuSmartClient c) { _c = c; }
+
+        /// <summary>GET /series — series del RUC con el siguiente número estimado.</summary>
+        public Task<JsonElement> ListarAsync(OpcionesRuc? opciones = null, CancellationToken cancellationToken = default)
+            => _c.JsonAsync(new FactuSmartClient.Peticion("GET", "/series") { Query = { ["ruc"] = _c.RucDe(opciones) }, Reintentable = true }, cancellationToken);
+    }
+
+    /// <summary><c>cliente.Comprobantes</c>: facturas, boletas y notas.</summary>
+    public sealed class RecursoComprobantes
+    {
+        private readonly FactuSmartClient _c;
+        internal RecursoComprobantes(FactuSmartClient c) { _c = c; }
+
+        /// <summary>
+        /// POST /documents — siempre con <c>Idempotency-Key</c> (la tuya o un UUID v4), reusada en todos los
+        /// reintentos. Completa <c>numero_documento</c> ("#"), fecha/hora de Perú, <c>codigo_tipo_moneda</c> (PEN)
+        /// y <c>codigo_tipo_operacion</c> (0101, solo 01/03) si no vienen. Revisa <c>aceptado_por_sunat</c>.
+        /// </summary>
+        public async Task<JsonElement> EmitirAsync(object datos, OpcionesEmision? opciones = null, CancellationToken cancellationToken = default)
+        {
+            if (datos == null) throw new FactuSmartException("Comprobantes.EmitirAsync(datos): pasa el comprobante como objeto.");
+            var cuerpo = _c.CuerpoConRuc(datos, opciones, "Comprobantes.EmitirAsync(datos): pasa el comprobante como objeto.");
+            var (fecha, hora) = FactuSmartClient.FechaHoraPeru();
+            if (Json.Falta(cuerpo, "numero_documento") || (cuerpo["numero_documento"] is JsonValue v && v.TryGetValue<string>(out var s) && s == ""))
+                cuerpo["numero_documento"] = "#";
+            if (Json.Falta(cuerpo, "fecha_de_emision")) cuerpo["fecha_de_emision"] = fecha;
+            if (Json.Falta(cuerpo, "hora_de_emision")) cuerpo["hora_de_emision"] = hora;
+            if (Json.Falta(cuerpo, "codigo_tipo_moneda")) cuerpo["codigo_tipo_moneda"] = "PEN";
+            // El yaml dice que codigo_tipo_operacion "no aplica a notas": solo se completa en 01/03.
+            string tipo = "";
+            if (cuerpo["codigo_tipo_documento"] is JsonValue td) tipo = td.TryGetValue<string>(out var t) ? t : td.ToJsonString();
+            if (Json.Falta(cuerpo, "codigo_tipo_operacion") && (tipo == "01" || tipo == "03"))
+                cuerpo["codigo_tipo_operacion"] = "0101";
+
+            var clave = string.IsNullOrWhiteSpace(opciones?.IdempotencyKey) ? Guid.NewGuid().ToString() : opciones!.IdempotencyKey!;
+            var p = new FactuSmartClient.Peticion("POST", "/documents") { Cuerpo = cuerpo, Reintentable = true, ReintentarEn409 = true };
+            p.Cabeceras["Idempotency-Key"] = clave;
+            return await _c.JsonAsync(p, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>GET /documents — filtros: <c>estado</c>, <c>desde</c>, <c>hasta</c>, <c>limite</c>, <c>antes_de</c> (cursor).</summary>
+        public async Task<JsonElement> ListarAsync(object? filtros = null, OpcionesRuc? opciones = null, CancellationToken cancellationToken = default)
+        {
+            var p = new FactuSmartClient.Peticion("GET", "/documents") { Reintentable = true };
+            foreach (var kv in Json.AObjeto(filtros, "Comprobantes.ListarAsync(filtros): pasa los filtros como objeto."))
+            {
+                if (kv.Value == null) continue;
+                p.Query[kv.Key] = kv.Value is JsonValue jv && jv.TryGetValue<string>(out var s) ? s : kv.Value.ToJsonString();
+            }
+            p.Query["ruc"] = _c.RucDe(opciones);
+            return await _c.JsonAsync(p, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>GET /documents/{external_id} — estado guardado (no consulta a SUNAT en vivo).</summary>
+        public async Task<JsonElement> ConsultarAsync(string externalId, OpcionesRuc? opciones = null, CancellationToken cancellationToken = default)
+            => await _c.JsonAsync(new FactuSmartClient.Peticion("GET", $"/documents/{FactuSmartClient.Id(externalId)}") { Query = { ["ruc"] = _c.RucDe(opciones) }, Reintentable = true }, cancellationToken).ConfigureAwait(false);
+
+        /// <summary>GET /documents/{external_id}/{pdf|xml|cdr} — devuelve los bytes del archivo.</summary>
+        public async Task<byte[]> DescargarAsync(string externalId, string tipo, OpcionesRuc? opciones = null, CancellationToken cancellationToken = default)
+        {
+            if (tipo != "pdf" && tipo != "xml" && tipo != "cdr")
+                throw new FactuSmartException($"Tipo de archivo inválido \"{tipo}\": usa \"pdf\", \"xml\" o \"cdr\".");
+            var p = new FactuSmartClient.Peticion("GET", $"/documents/{FactuSmartClient.Id(externalId)}/{tipo}") { Query = { ["ruc"] = _c.RucDe(opciones) }, Reintentable = true };
+            return await _c.BytesAsync(p, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>POST /documents/{external_id}/reenviar — no se reintenta automáticamente.</summary>
+        public async Task<JsonElement> ReenviarAsync(string externalId, OpcionesRuc? opciones = null, CancellationToken cancellationToken = default)
+            => await _c.JsonAsync(new FactuSmartClient.Peticion("POST", $"/documents/{FactuSmartClient.Id(externalId)}/reenviar") { Cuerpo = _c.CuerpoConRuc(null, opciones, ""), Reintentable = false }, cancellationToken).ConfigureAwait(false);
+
+        /// <summary>POST /documents/{external_id}/consultar-sunat — no se reintenta automáticamente.</summary>
+        public async Task<JsonElement> ConsultarSunatAsync(string externalId, OpcionesRuc? opciones = null, CancellationToken cancellationToken = default)
+            => await _c.JsonAsync(new FactuSmartClient.Peticion("POST", $"/documents/{FactuSmartClient.Id(externalId)}/consultar-sunat") { Cuerpo = _c.CuerpoConRuc(null, opciones, ""), Reintentable = false }, cancellationToken).ConfigureAwait(false);
+
+        /// <summary>GET /documents/{external_id}/historial.</summary>
+        public async Task<JsonElement> HistorialAsync(string externalId, OpcionesRuc? opciones = null, CancellationToken cancellationToken = default)
+            => await _c.JsonAsync(new FactuSmartClient.Peticion("GET", $"/documents/{FactuSmartClient.Id(externalId)}/historial") { Query = { ["ruc"] = _c.RucDe(opciones) }, Reintentable = true }, cancellationToken).ConfigureAwait(false);
+
+        /// <summary>
+        /// POST /calcular — FactuSmart calcula <c>items</c> y <c>totales</c> listos para emitir. No emite ni cobra
+        /// crédito y no manda <c>ruc</c>. Admite <c>precio_unitario</c> (con IGV) y <c>PorcentajeIgv</c> 10.5.
+        /// Sin efectos: se reintenta como un GET. Para hacerlo sin red usa <see cref="FactuSmartClient.CalcularComprobante"/>.
+        /// </summary>
+        public async Task<JsonElement> CalcularAsync(IEnumerable<object> items, OpcionesCalculo? opciones = null, CancellationToken cancellationToken = default)
+        {
+            var lista = items == null ? null : Json.ANodo(items) as JsonArray;
+            if (lista == null || lista.Count == 0)
+                throw new FactuSmartException("Comprobantes.CalcularAsync(items): pasa una lista con al menos un ítem.");
+            var cuerpo = new JsonObject { ["items"] = lista };
+            if (opciones?.PorcentajeIgv is decimal pct) cuerpo["porcentaje_igv"] = pct;
+            return await _c.JsonAsync(new FactuSmartClient.Peticion("POST", "/calcular") { Cuerpo = cuerpo, Reintentable = true }, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary><c>cliente.Anulaciones</c>: facturas (comunicación de baja) y boletas aceptadas (resumen diario).</summary>
+    public sealed class RecursoAnulaciones
+    {
+        private readonly FactuSmartClient _c;
+        internal RecursoAnulaciones(FactuSmartClient c) { _c = c; }
+
+        /// <summary>POST /anulaciones — no mezcles facturas y boletas (422 ANULACION_MIXTA). Nunca se reintenta.</summary>
+        public async Task<JsonElement> CrearAsync(object datos, OpcionesRuc? opciones = null, CancellationToken cancellationToken = default)
+        {
+            if (datos == null) throw new FactuSmartException("Anulaciones.CrearAsync(datos): pasa la anulación como objeto.");
+            var cuerpo = _c.CuerpoConRuc(datos, opciones, "Anulaciones.CrearAsync(datos): pasa la anulación como objeto.");
+            return await _c.JsonAsync(new FactuSmartClient.Peticion("POST", "/anulaciones") { Cuerpo = cuerpo, Reintentable = false }, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>GET /anulaciones/{ticket}/status.</summary>
+        public async Task<JsonElement> EstadoAsync(string ticket, OpcionesRuc? opciones = null, CancellationToken cancellationToken = default)
+            => await _c.JsonAsync(new FactuSmartClient.Peticion("GET", $"/anulaciones/{FactuSmartClient.Id(ticket, "el ticket de la anulación")}/status") { Query = { ["ruc"] = _c.RucDe(opciones) }, Reintentable = true }, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary><c>cliente.Guias</c>: guías de remisión (GRE 2.0).</summary>
+    public sealed class RecursoGuias
+    {
+        private readonly FactuSmartClient _c;
+        internal RecursoGuias(FactuSmartClient c) { _c = c; }
+
+        /// <summary>POST /guias — no usa Idempotency-Key, nunca se reintenta. Completa <c>numero_documento</c> y fecha/hora de Perú.</summary>
+        public async Task<JsonElement> EmitirAsync(object datos, OpcionesRuc? opciones = null, CancellationToken cancellationToken = default)
+        {
+            if (datos == null) throw new FactuSmartException("Guias.EmitirAsync(datos): pasa la guía como objeto.");
+            var cuerpo = _c.CuerpoConRuc(datos, opciones, "Guias.EmitirAsync(datos): pasa la guía como objeto.");
+            var (fecha, hora) = FactuSmartClient.FechaHoraPeru();
+            if (Json.Falta(cuerpo, "numero_documento")) cuerpo["numero_documento"] = "#";
+            if (Json.Falta(cuerpo, "fecha_de_emision")) cuerpo["fecha_de_emision"] = fecha;
+            if (Json.Falta(cuerpo, "hora_de_emision")) cuerpo["hora_de_emision"] = hora;
+            return await _c.JsonAsync(new FactuSmartClient.Peticion("POST", "/guias") { Cuerpo = cuerpo, Reintentable = false }, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>GET /guias/{external_id}/status.</summary>
+        public async Task<JsonElement> EstadoAsync(string externalId, OpcionesRuc? opciones = null, CancellationToken cancellationToken = default)
+            => await _c.JsonAsync(new FactuSmartClient.Peticion("GET", $"/guias/{FactuSmartClient.Id(externalId, "el external_id de la guía")}/status") { Query = { ["ruc"] = _c.RucDe(opciones) }, Reintentable = true }, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary><c>cliente.Rucs</c>: gestión de los RUCs de la cuenta (nunca se les agrega el RUC emisor).</summary>
+    public sealed class RecursoRucs
+    {
+        private readonly FactuSmartClient _c;
+        internal RecursoRucs(FactuSmartClient c) { _c = c; }
+
+        /// <summary>GET /rucs.</summary>
+        public Task<JsonElement> ListarAsync(CancellationToken cancellationToken = default)
+            => _c.JsonAsync(new FactuSmartClient.Peticion("GET", "/rucs") { Reintentable = true }, cancellationToken);
+
+        /// <summary>POST /rucs — <c>ruc</c>, <c>empresa</c>, <c>correo</c>, <c>clave</c>. Idempotente por RUC (<c>ya_existia</c>): se reintenta.</summary>
+        public async Task<JsonElement> CrearAsync(object datos, CancellationToken cancellationToken = default)
+        {
+            if (datos == null) throw new FactuSmartException("Rucs.CrearAsync(datos): pasa { ruc, empresa, correo, clave }.");
+            var cuerpo = Json.AObjeto(datos, "Rucs.CrearAsync(datos): pasa { ruc, empresa, correo, clave }.");
+            return await _c.JsonAsync(new FactuSmartClient.Peticion("POST", "/rucs") { Cuerpo = cuerpo, Reintentable = true }, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>PATCH /rucs/{ruc}/activation — nunca se reintenta.</summary>
+        public async Task<JsonElement> ActivarAsync(string ruc, bool activo, CancellationToken cancellationToken = default)
+        {
+            var id = FactuSmartClient.Id(ruc, "el RUC");
+            return await _c.JsonAsync(new FactuSmartClient.Peticion("PATCH", $"/rucs/{id}/activation") { Cuerpo = new JsonObject { ["activo"] = activo }, Reintentable = false }, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary><c>cliente.Catalogos</c>: catálogos SUNAT. No consumen crédito.</summary>
+    public sealed class RecursoCatalogos
+    {
+        private readonly FactuSmartClient _c;
+        internal RecursoCatalogos(FactuSmartClient c) { _c = c; }
+
+        /// <summary>GET /catalogos — <c>catalogos</c> y <c>nota</c>.</summary>
+        public Task<JsonElement> ListarAsync(OpcionesRuc? opciones = null, CancellationToken cancellationToken = default)
+            => _c.JsonAsync(new FactuSmartClient.Peticion("GET", "/catalogos") { Query = { ["ruc"] = _c.RucDe(opciones) }, Reintentable = true }, cancellationToken);
+
+        /// <summary>GET /catalogos/{nombre} — <c>nombre</c> = "unidades" o el número SUNAT ("03"). Usa solo las filas con <c>activo: true</c>.</summary>
+        public async Task<JsonElement> ConsultarAsync(string nombre, OpcionesCatalogo? opciones = null, CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrWhiteSpace(nombre))
+                throw new FactuSmartException("Catalogos.ConsultarAsync(nombre): pasa el nombre (ej. \"unidades\") o el número SUNAT (ej. \"03\").");
+            var p = new FactuSmartClient.Peticion("GET", $"/catalogos/{Uri.EscapeDataString(nombre.Trim())}") { Reintentable = true };
+            p.Query["q"] = opciones?.Q;
+            p.Query["ruc"] = _c.RucDe(opciones);
+            return await _c.JsonAsync(p, cancellationToken).ConfigureAwait(false);
+        }
+    }
+}

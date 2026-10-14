@@ -1,0 +1,74 @@
+{
+  "items": [
+    {
+      "descripcion": "A",
+      "unidad_de_medida": "NIU",
+      "cantidad": 3,
+      "valor_unitario": 10.56,
+      "codigo_tipo_precio": "01",
+      "precio_unitario": 12.45,
+      "codigo_tipo_afectacion_igv": "10",
+      "total_base_igv": 31.67,
+      "porcentaje_igv": 18,
+      "total_igv": 5.7,
+      "total_impuestos": 5.7,
+      "total_valor_item": 31.67,
+      "total_item": 37.37
+    },
+    {
+      "descripcion": "B",
+      "unidad_de_medida": "NIU",
+      "cantidad": 2,
+      "valor_unitario": 5,
+      "codigo_tipo_precio": "01",
+      "precio_unitario": 5,
+      "codigo_tipo_afectacion_igv": "20",
+      "total_base_igv": 10,
+      "porcentaje_igv": 0,
+      "total_igv": 0,
+      "total_impuestos": 0,
+      "total_valor_item": 10,
+      "total_item": 10
+    },
+    {
+      "descripcion": "C",
+      "unidad_de_medida": "NIU",
+      "cantidad": 1,
+      "valor_unitario": 7.1,
+      "codigo_tipo_precio": "01",
+      "precio_unitario": 7.1,
+      "codigo_tipo_afectacion_igv": "30",
+      "total_base_igv": 7.1,
+      "porcentaje_igv": 0,
+      "total_igv": 0,
+      "total_impuestos": 0,
+      "total_valor_item": 7.1,
+      "total_item": 7.1
+    },
+    {
+      "descripcion": "D",
+      "unidad_de_medida": "NIU",
+      "cantidad": 1,
+      "valor_unitario": 100,
+      "codigo_tipo_precio": "01",
+      "precio_unitario": 100,
+      "codigo_tipo_afectacion_igv": "40",
+      "total_base_igv": 100,
+      "porcentaje_igv": 0,
+      "total_igv": 0,
+      "total_impuestos": 0,
+      "total_valor_item": 100,
+      "total_item": 100
+    }
+  ],
+  "totales": {
+    "total_operaciones_gravadas": 31.67,
+    "total_operaciones_exoneradas": 10,
+    "total_operaciones_inafectas": 7.1,
+    "total_exportacion": 100,
+    "total_igv": 5.7,
+    "total_impuestos": 5.7,
+    "total_valor": 148.77,
+    "total_venta": 154.47
+  }
+}

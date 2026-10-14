@@ -1,0 +1,3112 @@
+openapi: 3.1.0
+
+info:
+  title: API de Facturación Electrónica FactuSmart
+  version: "1.0.0"
+  summary: Emisión de comprobantes electrónicos SUNAT (Perú) para integradores.
+  contact:
+    name: FactuSmart
+    url: https://factusmart.pe/api-facturacion-electronica/docs
+  license:
+    # API propietaria (no es software libre). No hay licencia SPDX publicada que aplique:
+    # `LicenseRef-*` es la forma SPDX de nombrar una licencia propia no listada.
+    name: Propietario — uso sujeto a los términos de servicio de FactuSmart
+    identifier: LicenseRef-FactuSmart-Propietario
+  description: |
+    API REST para que sistemas de terceros emitan **facturas, boletas, notas de crédito/débito,
+    guías de remisión (GRE 2.0) y anulaciones** (comunicación de baja para facturas, resumen diario
+    para boletas) ante SUNAT, y descarguen el PDF, el XML firmado y el CDR. Tú envías la venta en
+    JSON; FactuSmart arma el XML UBL 2.1, lo firma y lo envía.
+
+    **¿No quieres calcular el IGV a mano?** `POST /calcular` te devuelve `items` y `totales` listos
+    para copiar en `POST /documents`. Los códigos SUNAT (unidades, afectación, motivos…) están en
+    `GET /catalogos`. Ninguno de los dos consume crédito.
+
+    **¿Integras con un agente de IA (Claude, ChatGPT, Cursor)?** Dale este enlace, que trae toda la
+    documentación en un solo archivo Markdown:
+    https://factusmart.pe/api-facturacion-electronica/llms-full.txt
+
+    Todas las respuestas son **JSON** (`Content-Type: application/json`), salvo las descargas de
+    archivos (`/documents/{external_id}/{type}`), que devuelven el archivo (y un error JSON `404` si
+    el comprobante o el archivo no existen).
+
+    ## Autenticación
+
+    Toda petición lleva tu API key en el header:
+
+    ```
+    X-API-Key: TU_API_KEY
+    ```
+
+    Como alternativa, el middleware también acepta `Authorization: Bearer TU_API_KEY`.
+    Sin key → `401`. Key inválida o cuenta desactivada → `401`.
+
+    ### Llave de prueba y llave de producción
+
+    Cada cuenta puede tener **dos llaves**, que se envían igual y usan la **misma URL base**:
+
+    | | Llave de producción | Llave de prueba |
+    |---|---|---|
+    | Formato | 64 letras y números (la de siempre) | Empieza con `fs_test_` |
+    | Dónde se obtiene | Portal → Configuración | Portal → Configuración → "Generar llave de prueba" |
+    | Emitir, anular, guías, `/reenviar`, `/consultar-sunat` | En todos tus RUCs | **Solo en RUCs en modo demo** |
+    | Consultar, listar, descargar, historial, series, cuenta, ping | Todos tus RUCs | Todos tus RUCs |
+    | Crear y listar RUCs (`/rucs`) | Sí | Sí |
+    | Activar/desactivar un RUC | Sí | Solo si el RUC está en modo demo |
+    | Créditos | 1 por operación en RUCs en producción; **gratis en RUCs demo** (tope 200/día) | Gratis (solo opera en RUCs demo; tope 200/día) |
+    | Límite de peticiones | 120/min | 120/min (contador propio) |
+
+    La llave de prueba es **opcional**: si ya integraste con tu llave de siempre, esa es tu llave de
+    producción y sigue funcionando igual. Úsala en desarrollo y staging para que tu sistema de pruebas
+    **nunca pueda emitir por error un comprobante real**: si apunta a un RUC en producción, la API
+    responde `403` con `codigo: LLAVE_DE_PRUEBA_EN_PRODUCCION` en vez de enviarlo a SUNAT. El control
+    es inmediato: si un RUC pasa de demo a producción, la llave de prueba deja de poder emitir en él al
+    instante. `GET /ping` te dice qué llave usas (`tipo_llave`: `prueba`/`produccion`). Cada llave
+    se regenera por separado en el portal y la anterior deja de funcionar al momento.
+
+    El campo `entorno` de los comprobantes no depende de la llave: indica en qué entorno de SUNAT
+    salió **ese** comprobante.
+
+    ## Cuenta y RUCs
+
+    Una **cuenta API** tiene una bolsa de créditos compartida y puede emitir para uno o varios RUCs.
+    El RUC emisor se elige con (en este orden de prioridad):
+
+    1. el campo `ruc` (en el body JSON o como query `?ruc=`),
+    2. el campo `emisor_ruc` (alias),
+    3. el header `X-RUC`.
+
+    Si no indicas RUC y la cuenta tiene **un solo** RUC, se usa ese automáticamente. Si tiene varios y
+    no indicas cuál, los endpoints que operan sobre un RUC responden `422`. Un RUC que no pertenece a la
+    cuenta → `403`. Un RUC desactivado → `403`. Los endpoints `/rucs*` nunca resuelven RUC (gestionan
+    la cuenta).
+
+    Cada cuenta empieza con un tope de **50 RUCs** (freno de seguridad, no límite comercial). Lo
+    amplías tú mismo de 50 en 50 desde tu portal de integrador: **Empresas → Ampliar límite (+50)**.
+    Ver `POST /rucs`.
+
+    ## Créditos
+
+    Todo es prepago. Cuesta **1 crédito**: cada comprobante emitido (`POST /documents`), cada guía
+    **enviada** a SUNAT (`POST /guias`) y cada anulación **enviada** (`POST /anulaciones`), **en un
+    RUC en producción**. En un RUC en **modo demo** no se cobra nada (ver "Pruebas sin costo").
+    El crédito se reserva de forma atómica antes de emitir/enviar y se **devuelve** si la operación
+    falla con error (respuesta `422`). Ojo: si el comprobante se genera pero SUNAT no lo acepta
+    (queda en estado `01`), la respuesta es `200` y el crédito **sí** se cobra; se reintenta gratis con
+    `/reenviar`. Consultar, listar, descargar, ver saldo, `/calcular` y `/catalogos` es gratis.
+    Sin saldo → `402`.
+
+    Las respuestas de `POST /documents`, `POST /guias` y `POST /anulaciones` traen
+    `creditos_restantes` (tu saldo real tras la operación) y `credito_cobrado` (`true` si esta
+    operación descontó 1 crédito; en demo siempre `false`; en `/guias`, `false` también si la guía
+    no se pudo enviar y se devolvió).
+
+    ### Pruebas sin costo (RUC en modo demo)
+
+    En un RUC en modo demo (SUNAT beta) emitir, enviar guías y anular **no gasta créditos**, con
+    cualquiera de tus dos llaves: lo que decide es el modo del RUC, no la llave. La respuesta lo dice:
+
+    ```json
+    { "creditos_restantes": 14945, "credito_cobrado": false, "modo_demo": true, "pruebas_restantes_hoy": 198 }
+    ```
+
+    - `creditos_restantes` es tu saldo real (no cambia en demo).
+    - `modo_demo` y `pruebas_restantes_hoy` solo aparecen cuando la operación fue en un RUC demo.
+    - Tope: **200 operaciones en demo por cuenta y por día** (emisiones + guías + anulaciones, todas
+      tus empresas juntas). Al pasarlo la API responde `429` con `codigo: LIMITE_PRUEBAS_DIARIO` y
+      `reintentable: false`: reintentar hoy no sirve, el cupo se reinicia a medianoche (hora de Perú).
+      En producción no hay este tope.
+    - Una operación que falla (`422`) no cuenta para el tope.
+
+    ## Modo prueba vs producción (por RUC)
+
+    Cada RUC **nace en modo prueba** (SUNAT beta, sin validez fiscal): se puede integrar sin
+    certificado ni clave SOL. El paso a producción se hace por RUC desde su panel
+    (`https://{RUC}.{servidor}.factusmart.pe`). La misma API key y los mismos endpoints sirven en ambos
+    modos. Cada comprobante informa en qué entorno salió (`entorno`: `prueba`/`produccion`,
+    `tiene_validez_fiscal`).
+
+    ## Idempotencia
+
+    `POST /documents` acepta el header `Idempotency-Key` (único por venta). Si reintentas con la misma
+    key y la emisión ya terminó, recibes la **misma respuesta** sin reemitir ni recobrar. Si la primera
+    petición aún se procesa → `409`. Si la emisión falló (`402`/`422`), la key se libera y puedes
+    reintentar con ella. Solo existe en `POST /documents`.
+
+    ## Webhooks (avisos de cambio de estado)
+
+    En vez de consultar `GET /documents/{external_id}` cada cierto tiempo, puedes recibir un **POST
+    firmado** en tu servidor cuando un comprobante **emitido por el API** pasa a aceptado (`05`),
+    observado (`07`), rechazado (`09`) o anulado (`11`). Se configura **una URL por cuenta** (recibes
+    los avisos de todos tus RUCs) en tu portal de integrador, pestaña **Webhooks**; ahí obtienes el
+    secreto `whsec_…` y puedes enviar un aviso de prueba. No hay endpoint del API para configurarlo.
+
+    - Firma: header `X-FactuSmart-Firma` = HMAC-SHA256 (hex) del **cuerpo crudo** con tu secreto.
+      Los SDK traen `verificarFirmaWebhook` / `verificar_firma_webhook`.
+    - Responde `2xx` en menos de **8 segundos**. Si no, se reintenta: 6 intentos en total
+      (inmediato, +1 min, +5 min, +30 min, +2 h, +6 h). No se siguen redirecciones.
+    - El `id` del aviso es el mismo en todos los reintentos: úsalo para no procesarlo dos veces.
+
+    El detalle del payload y los headers está en la sección `webhooks` (`comprobanteEstado`).
+
+    ## HTTP 200 no significa "aceptado por SUNAT"
+
+    En emisión y consultas revisa siempre `aceptado_por_sunat` y `estado`
+    (`01` Registrado, `03` Enviado, `05` Aceptado, `07` Observado, `09` Rechazado, `11` Anulado,
+    `13` Por anular).
+
+    ## Límites de uso
+
+    - `120` peticiones/minuto **por API key** (limitador `issuer`).
+    - Además, el grupo de rutas `api` aplica `60` peticiones/minuto **por IP** antes de autenticar.
+
+    Al superar cualquiera de los dos límites la respuesta es **HTTP 429** con el header `Retry-After`
+    (segundos) y `{"success": false, "message": "Demasiadas peticiones. Espera N segundos e intenta de nuevo.", "retry_after": N, "codigo": "LIMITE_PETICIONES", "reintentable": true}`.
+    Espera esos segundos y reintenta.
+
+    Hay **otro** `429` que **no** se reintenta: `LIMITE_PRUEBAS_DIARIO` (tope de 200 operaciones
+    diarias en RUCs demo). Decide siempre por `codigo`/`reintentable`, no solo por el HTTP.
+
+    ## Errores
+
+    Toda respuesta de error (HTTP `4xx`/`5xx`) tiene la misma forma base (schema `Error`):
+
+    ```json
+    {"success": false, "message": "Comprobante no encontrado.", "codigo": "NO_ENCONTRADO", "reintentable": false}
+    ```
+
+    - `message`: texto en español para mostrar o registrar. **No lo compares**: puede cambiar de redacción.
+    - `codigo`: identificador estable en MAYÚSCULAS. Decide tu lógica con este campo.
+    - `reintentable`: `true` si repetir **la misma petición** más tarde puede funcionar (límite de
+      peticiones, emisión en curso, SUNAT caída, error interno). `false` = hay que corregir algo antes.
+    - Algunos errores agregan campos propios (`creditos_restantes`, `retry_after`, `campos`, o el
+      estado del comprobante en `/reenviar`).
+
+    | `codigo` | HTTP | `reintentable` | Significado |
+    |---|---|---|---|
+    | `NO_AUTENTICADO` | 401 | no | Falta la API key, es inválida o la cuenta está desactivada. |
+    | `PLAN_VENCIDO` | 402 | no | El plan de la cuenta venció. Solo quedan abiertos `/ping`, `/account` y `/rucs*`. |
+    | `SIN_CREDITOS` | 402 | no | Sin créditos. No se emitió ni envió nada. Trae `creditos_restantes: 0`. |
+    | `RUC_NO_AUTORIZADO` | 403 | no | El RUC indicado no pertenece a la cuenta o no existe. |
+    | `RUC_DESACTIVADO` | 403 | no | El RUC está desactivado (`PATCH /rucs/{ruc}/activation`). |
+    | `LLAVE_DE_PRUEBA_EN_PRODUCCION` | 403 | no | Usaste la llave de prueba (`fs_test_…`) para emitir, anular, enviar una guía, reenviar, consultar-sunat o activar/desactivar un RUC que está en **producción**. Usa tu llave de producción. |
+    | `SIN_PERMISO` | 403 | no | Acción no permitida. |
+    | `NO_ENCONTRADO` | 404 | no | No existe el comprobante/guía/anulación, o el archivo a descargar (PDF/XML/CDR). |
+    | `RUTA_NO_ENCONTRADA` | 404 | no | La URL no existe (revisa la ruta y la URL base). |
+    | `METODO_NO_PERMITIDO` | 405 | no | Método HTTP incorrecto para esa ruta. |
+    | `EMISION_EN_CURSO` | 409 | **sí** | Ya hay una emisión en curso con esa `Idempotency-Key`. Reintenta en unos segundos. |
+    | `CONFLICTO` | 409 | no | Conflicto con el estado actual (ej. el RUC ya está registrado con otra cuenta). |
+    | `DATOS_INVALIDOS` | 422 | no | El payload o los parámetros no pasan la validación. Si hay detalle por campo, viene en `campos`. |
+    | `RUC_REQUERIDO` | 422 | no | La cuenta tiene varios RUCs y no indicaste cuál (`ruc`). |
+    | `RUC_SIN_TENANT` | 422 | no | El RUC no tiene una empresa (tenant) asociada. Contacta soporte. |
+    | `CERTIFICADO_NO_CONFIGURADO` | 422 | no | El RUC no tiene certificado digital (ni envío por PSE). |
+    | `ERROR_EMISION` | 422 | no | El motor no pudo generar el comprobante/guía/anulación. Revisa `message`. Crédito devuelto. |
+    | `RECHAZADO_SUNAT` | 422 | no | `/reenviar`: SUNAT rechazó el comprobante (estado `09`). Corrige y emite uno nuevo. |
+    | `REENVIO_FALLIDO` | 422 | no | `/reenviar`: el reintento no se completó por otro motivo. Revisa `message`. |
+    | `SUNAT_NO_DISPONIBLE` | 422 / 5xx | **sí** | SUNAT (o la red hacia SUNAT/PSE) no respondió. Reintenta más tarde. |
+    | `LIMITE_PETICIONES` | 429 | **sí** | Demasiadas peticiones. Espera `Retry-After` segundos. |
+    | `LIMITE_PRUEBAS_DIARIO` | 429 | **no** | Llegaste a las 200 operaciones en modo demo de hoy. Se reinicia a medianoche (hora de Perú). Trae `pruebas_restantes_hoy: 0`, `limite_pruebas_diario` y `creditos_restantes`. |
+    | `ANULACION_MIXTA` | 422 | no | `POST /anulaciones` con facturas y boletas juntas. Haz una petición para cada tipo. |
+    | `ERROR_INTERNO` | 5xx | **sí** | Error interno del servidor. Reintenta; si persiste, contacta soporte. |
+
+    La lista puede crecer: trata un `codigo` desconocido como no reintentable salvo que
+    `reintentable` diga lo contrario.
+
+    ### Errores de validación
+
+    - Los errores del payload de emisión (`/documents`, `/anulaciones`, `/guias`) devuelven
+      `422` con `codigo: DATOS_INVALIDOS` y el detalle en `message`.
+    - `POST /calcular` y `GET /catalogos/{nombre}` devuelven `422 DATOS_INVALIDOS` con el detalle
+      por campo en `campos` (ej. `{"items.0.cantidad": ["cantidad debe ser un número mayor que 0."]}`).
+    - Los endpoints con validación por campo (`GET /documents`, `POST /rucs`, `PATCH /rucs/{ruc}/activation`)
+      devuelven `422` con `codigo: DATOS_INVALIDOS` y el mapa `{"campo": ["mensaje"]}` en `campos`.
+      Por compatibilidad con integraciones existentes, ese mismo mapa sigue apareciendo donde
+      aparecía antes: en la raíz del JSON si envías `Accept: application/json`, o dentro de `message`
+      si no lo envías. Usa `campos`, que es igual en ambos casos.
+      Nunca se exponen rutas de archivos ni líneas de código del servidor.
+    - La API **ignora en silencio** los campos con nombre mal escrito.
+
+servers:
+  - url: https://{servidor}.factusmart.pe/api/v1/issuer
+    description: |
+      Servidor de producción donde vive tu cuenta. La URL base exacta aparece en tu panel de
+      integrador (pestaña Configuración, "URL base de la API"); se arma con el host del portal donde
+      te registraste. Una API key solo es válida en su servidor.
+    variables:
+      servidor:
+        default: s2
+        enum: [s1, s2, s3, s4]
+        description: Servidor de FactuSmart al que pertenece tu cuenta API.
+
+security:
+  - ApiKeyHeader: []
+  - BearerApiKey: []
+
+tags:
+  - name: Utilidades
+    description: Pruebas de conexión.
+  - name: Cuenta
+    description: Saldo de créditos, plan y series.
+  - name: RUCs
+    description: Alta, listado y activación/desactivación de los RUCs de la cuenta.
+  - name: Comprobantes
+    description: Facturas (01), boletas (03), notas de crédito (07) y débito (08).
+  - name: Anulaciones
+    description: Anulación de facturas (comunicación de baja) y boletas (resumen diario). Asíncrona, con ticket.
+  - name: Guías de remisión
+    description: Guías de remisión electrónica GRE 2.0 (asíncronas).
+  - name: Herramientas
+    description: Calcular importes y consultar catálogos SUNAT. No emiten nada ni consumen crédito.
+  - name: Webhooks
+    description: Avisos que FactuSmart envía a tu servidor cuando cambia el estado de un comprobante.
+
+paths:
+  /ping:
+    get:
+      operationId: ping
+      tags: [Utilidades]
+      summary: Probar la API key
+      description: |
+        Confirma que la API key es válida y devuelve el saldo. No consume crédito.
+        Si se resolvió un RUC (indicado o único en la cuenta) agrega `ruc_emisor` y `razon_social`.
+        `tipo_llave` indica si autenticaste con la llave de `prueba` (`fs_test_…`) o la de `produccion`.
+      parameters:
+        - $ref: '#/components/parameters/RucQuery'
+        - $ref: '#/components/parameters/XRucHeader'
+      responses:
+        '200':
+          description: Autenticado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PingResponse'
+              example:
+                success: true
+                message: Autenticado correctamente
+                cuenta: Mi Integración
+                creditos: 4830
+                tipo_llave: produccion
+                ruc_emisor: "20123456789"
+                razon_social: MI EMPRESA
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RucForbidden'
+        '422':
+          $ref: '#/components/responses/RucWithoutTenant'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/ServerErrorOrRateLimit'
+
+  /account:
+    get:
+      operationId: getAccount
+      tags: [Cuenta]
+      summary: Estado de la cuenta
+      description: Saldo disponible, total recargado, consumido, plan y RUCs de la cuenta. No requiere RUC. No consume crédito.
+      responses:
+        '200':
+          description: Estado de la cuenta.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RucForbidden'
+        '422':
+          $ref: '#/components/responses/RucWithoutTenant'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/ServerErrorOrRateLimit'
+
+  /series:
+    get:
+      operationId: listSeries
+      tags: [Cuenta]
+      summary: Series del RUC
+      description: |
+        Series configuradas en el establecimiento principal del RUC (el del usuario admin), con el
+        siguiente número estimado. FactuSmart no usa F001/B001: cada RUC nace con series propias
+        (FA01, BA01, FN01, TA01, ...). `siguiente_numero` es el último número emitido en esa serie + 1,
+        contado sobre lo que corresponde a cada tipo (comprobantes 01/03/07/08, guías 09/31, etc.).
+        Es una estimación: si otro proceso emite entre la consulta y tu envío, el número real será
+        mayor (usa `numero_documento: "#"` para que el sistema asigne el correlativo). Requiere RUC.
+      parameters:
+        - $ref: '#/components/parameters/RucQuery'
+        - $ref: '#/components/parameters/XRucHeader'
+      responses:
+        '200':
+          description: Series del RUC.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SeriesResponse'
+              example:
+                success: true
+                series:
+                  - { serie: FA01, codigo_tipo_documento: "01", siguiente_numero: 15 }
+                  - { serie: BA01, codigo_tipo_documento: "03", siguiente_numero: 230 }
+                  - { serie: FN01, codigo_tipo_documento: "07", siguiente_numero: 1 }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RucForbidden'
+        '422':
+          $ref: '#/components/responses/RucRequired'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/ServerErrorOrRateLimit'
+
+  /documents:
+    post:
+      operationId: emitDocument
+      tags: [Comprobantes]
+      summary: Emitir comprobante
+      description: |
+        Emite una factura (01), boleta (03), nota de crédito (07) o nota de débito (08): genera el XML
+        UBL 2.1, lo firma, crea el PDF, lo envía a SUNAT y responde con el resultado. Cuesta 1 crédito
+        (gratis en RUCs demo, con tope de 200 pruebas por día; ver "Pruebas sin costo").
+
+        - **Lo más fácil:** arma `items` y `totales` con `POST /calcular` y cópialos tal cual aquí.
+
+        - `serie_documento` es opcional si el establecimiento tiene una sola serie para ese tipo
+          (caso normal en facturas y boletas). En notas normalmente hay dos (de factura y de boleta):
+          envíala. Consulta `GET /series`.
+        - `numero_documento`: envía `"#"` (o no lo envíes) para que FactuSmart asigne el correlativo.
+          Si mandas un número que ya existe → `422`.
+        - Cliente con RUC (`6`) o DNI (`1`): basta el número; nombre y dirección se autocompletan.
+          Otros tipos exigen `apellidos_y_nombres_o_razon_social`.
+        - Factura con `codigo_tipo_operacion` `0101` exige cliente con RUC. Boleta mayor a S/ 700
+          exige cliente identificado.
+        - Si hay `detraccion`, la leyenda 2006 se agrega sola. Con operación `1004`,
+          `ubigeo_origen` y `ubigeo_destino` son obligatorios.
+        - HTTP `200` = comprobante generado. Revisa `aceptado_por_sunat`.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/XRucHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmitDocumentRequest'
+            examples:
+              facturaMinima:
+                summary: Factura mínima (sin serie, cliente solo con RUC)
+                value:
+                  ruc: "20123456789"
+                  numero_documento: "#"
+                  fecha_de_emision: "2026-07-08"
+                  hora_de_emision: "10:30:00"
+                  codigo_tipo_operacion: "0101"
+                  codigo_tipo_documento: "01"
+                  codigo_tipo_moneda: PEN
+                  datos_del_cliente_o_receptor:
+                    codigo_tipo_documento_identidad: "6"
+                    numero_documento: "20131312955"
+                  totales:
+                    total_operaciones_gravadas: 100.00
+                    total_igv: 18.00
+                    total_impuestos: 18.00
+                    total_valor: 100.00
+                    total_venta: 118.00
+                  items:
+                    - codigo_interno: PROD-001
+                      descripcion: Servicio de consultoría
+                      unidad_de_medida: NIU
+                      cantidad: 1
+                      valor_unitario: 100.00
+                      codigo_tipo_precio: "01"
+                      precio_unitario: 118.00
+                      codigo_tipo_afectacion_igv: "10"
+                      total_base_igv: 100.00
+                      porcentaje_igv: 18
+                      total_igv: 18.00
+                      total_impuestos: 18.00
+                      total_valor_item: 100.00
+                      total_item: 118.00
+              boleta:
+                summary: Boleta a cliente con DNI
+                value:
+                  ruc: "20123456789"
+                  numero_documento: "#"
+                  fecha_de_emision: "2026-07-08"
+                  hora_de_emision: "10:30:00"
+                  codigo_tipo_operacion: "0101"
+                  codigo_tipo_documento: "03"
+                  codigo_tipo_moneda: PEN
+                  datos_del_cliente_o_receptor:
+                    codigo_tipo_documento_identidad: "1"
+                    numero_documento: "12345678"
+                  totales:
+                    total_operaciones_gravadas: 50.00
+                    total_igv: 9.00
+                    total_impuestos: 9.00
+                    total_valor: 50.00
+                    total_venta: 59.00
+                  items:
+                    - codigo_interno: PROD-002
+                      descripcion: Producto de prueba
+                      unidad_de_medida: NIU
+                      cantidad: 1
+                      valor_unitario: 50.00
+                      codigo_tipo_precio: "01"
+                      precio_unitario: 59.00
+                      codigo_tipo_afectacion_igv: "10"
+                      total_base_igv: 50.00
+                      porcentaje_igv: 18
+                      total_igv: 9.00
+                      total_impuestos: 9.00
+                      total_valor_item: 50.00
+                      total_item: 59.00
+              notaDeCredito:
+                summary: Nota de crédito (anulación de la operación) referida por serie-número
+                value:
+                  ruc: "20123456789"
+                  serie_documento: FN01
+                  numero_documento: "#"
+                  fecha_de_emision: "2026-07-08"
+                  hora_de_emision: "10:45:00"
+                  codigo_tipo_documento: "07"
+                  codigo_tipo_nota: "01"
+                  motivo_o_sustento_de_nota: Anulación de la operación
+                  documento_afectado:
+                    serie_documento: FA01
+                    numero_documento: "1"
+                    codigo_tipo_documento: "01"
+                  codigo_tipo_moneda: PEN
+                  datos_del_cliente_o_receptor:
+                    codigo_tipo_documento_identidad: "6"
+                    numero_documento: "20131312955"
+                  totales:
+                    total_operaciones_gravadas: 100.00
+                    total_igv: 18.00
+                    total_impuestos: 18.00
+                    total_valor: 100.00
+                    total_venta: 118.00
+                  items:
+                    - codigo_interno: PROD-001
+                      descripcion: Servicio de consultoría
+                      unidad_de_medida: NIU
+                      cantidad: 1
+                      valor_unitario: 100.00
+                      codigo_tipo_precio: "01"
+                      precio_unitario: 118.00
+                      codigo_tipo_afectacion_igv: "10"
+                      total_base_igv: 100.00
+                      porcentaje_igv: 18
+                      total_igv: 18.00
+                      total_impuestos: 18.00
+                      total_valor_item: 100.00
+                      total_item: 118.00
+              facturaConDetraccion:
+                summary: Factura sujeta a detracción (operación 1001)
+                value:
+                  ruc: "20123456789"
+                  numero_documento: "#"
+                  fecha_de_emision: "2026-07-08"
+                  hora_de_emision: "10:30:00"
+                  codigo_tipo_operacion: "1001"
+                  codigo_tipo_documento: "01"
+                  codigo_tipo_moneda: PEN
+                  datos_del_cliente_o_receptor:
+                    codigo_tipo_documento_identidad: "6"
+                    numero_documento: "20131312955"
+                  totales:
+                    total_operaciones_gravadas: 1000.00
+                    total_igv: 180.00
+                    total_impuestos: 180.00
+                    total_valor: 1000.00
+                    total_venta: 1180.00
+                  detraccion:
+                    codigo_tipo_detraccion: "022"
+                    porcentaje: 12
+                    monto: 141.60
+                    codigo_metodo_pago: "001"
+                    cuenta_bancaria: "00-000-000000"
+                  items:
+                    - codigo_interno: SERV-001
+                      descripcion: Servicio empresarial sujeto a detracción
+                      unidad_de_medida: ZZ
+                      cantidad: 1
+                      valor_unitario: 1000.00
+                      codigo_tipo_precio: "01"
+                      precio_unitario: 1180.00
+                      codigo_tipo_afectacion_igv: "10"
+                      total_base_igv: 1000.00
+                      porcentaje_igv: 18
+                      total_igv: 180.00
+                      total_impuestos: 180.00
+                      total_valor_item: 1000.00
+                      total_item: 1180.00
+              facturaAlCredito:
+                summary: Factura al crédito con cuotas, orden de compra e información adicional
+                value:
+                  ruc: "20123456789"
+                  numero_documento: "#"
+                  fecha_de_emision: "2026-07-08"
+                  hora_de_emision: "10:30:00"
+                  codigo_tipo_operacion: "0101"
+                  codigo_tipo_documento: "01"
+                  codigo_tipo_moneda: PEN
+                  numero_orden_de_compra: OC-2026-4521
+                  codigo_condicion_de_pago: "02"
+                  cuotas:
+                    - { fecha: "2026-08-08", codigo_tipo_moneda: PEN, monto: 118.00 }
+                    - { fecha: "2026-09-08", codigo_tipo_moneda: PEN, monto: 118.00 }
+                  informacion_adicional: Entrega en almacén central
+                  datos_del_cliente_o_receptor:
+                    codigo_tipo_documento_identidad: "6"
+                    numero_documento: "20555555555"
+                  totales:
+                    total_operaciones_gravadas: 200.00
+                    total_igv: 36.00
+                    total_impuestos: 36.00
+                    total_valor: 200.00
+                    total_venta: 236.00
+                  items:
+                    - descripcion: Servicio de consultoría
+                      unidad_de_medida: NIU
+                      cantidad: 2
+                      valor_unitario: 100.00
+                      codigo_tipo_precio: "01"
+                      precio_unitario: 118.00
+                      codigo_tipo_afectacion_igv: "10"
+                      total_base_igv: 200.00
+                      porcentaje_igv: 18
+                      total_igv: 36.00
+                      total_impuestos: 36.00
+                      total_valor_item: 200.00
+                      total_item: 236.00
+      responses:
+        '200':
+          description: |
+            Comprobante generado (o respuesta repetida por `Idempotency-Key`). No implica aceptación de
+            SUNAT: revisa `aceptado_por_sunat`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmitDocumentResponse'
+              example:
+                success: true
+                estado: "05"
+                estado_descripcion: Aceptado
+                serie_numero: FA01-1234
+                external_id: 9822f52c-108e-47ff-9d2e-5f0c3c1a7b11
+                sunat: { codigo: "0", descripcion: "La Factura numero FA01-1234, ha sido aceptada" }
+                creditos_restantes: 4830
+                credito_cobrado: true
+                aceptado_por_sunat: true
+                entorno: prueba
+                tiene_validez_fiscal: false
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/NoCredits'
+        '403':
+          $ref: '#/components/responses/RucForbiddenOrTestKey'
+        '409':
+          description: Ya hay una emisión en curso con esa `Idempotency-Key`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                success: false
+                message: Ya hay una emisión en curso con esa Idempotency-Key. Reintenta en unos segundos.
+                codigo: EMISION_EN_CURSO
+                reintentable: true
+        '422':
+          description: |
+            Falta el RUC (cuenta con varios), el RUC no tiene tenant, payload inválido
+            (`Datos del comprobante inválidos o incompletos...`) o error del motor de emisión
+            (`Ocurrió un error al emitir el comprobante: ...`). El crédito no se cobra.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                payloadInvalido:
+                  value:
+                    success: false
+                    message: "Datos del comprobante inválidos o incompletos. Revisa el formato del JSON. (La serie ingresada FA09, es incorrecta.)"
+                    codigo: DATOS_INVALIDOS
+                    reintentable: false
+                rucRequerido:
+                  value:
+                    success: false
+                    message: Indica el RUC emisor en el campo "ruc" (tu cuenta tiene varios RUCs enlazados).
+                    codigo: RUC_REQUERIDO
+                    reintentable: false
+        '429':
+          $ref: '#/components/responses/RateLimitedOrDemoLimit'
+        '500':
+          $ref: '#/components/responses/ServerErrorOrRateLimit'
+
+    get:
+      operationId: listDocuments
+      tags: [Comprobantes]
+      summary: Listar comprobantes
+      description: |
+        Lista comprobantes (01/03/07/08) del RUC, del más reciente al más antiguo, con el diagnóstico
+        SUNAT de cada uno. Paginación por cursor: pasa `siguiente_cursor` como `antes_de`.
+        No consume crédito.
+      parameters:
+        - $ref: '#/components/parameters/RucQuery'
+        - $ref: '#/components/parameters/XRucHeader'
+        - name: estado
+          in: query
+          required: false
+          description: Filtra por código de estado (ej. `01` para los no aceptados todavía).
+          schema:
+            $ref: '#/components/schemas/EstadoCodigo'
+        - name: desde
+          in: query
+          required: false
+          description: Fecha de emisión mínima (inclusive).
+          schema: { type: string, format: date }
+        - name: hasta
+          in: query
+          required: false
+          description: Fecha de emisión máxima (inclusive).
+          schema: { type: string, format: date }
+        - name: limite
+          in: query
+          required: false
+          description: Cantidad máxima de resultados.
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - name: antes_de
+          in: query
+          required: false
+          description: Cursor. Devuelve comprobantes con id interno menor a este valor.
+          schema: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          description: Página de comprobantes.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RucForbidden'
+        '422':
+          description: Falta el RUC o los filtros no pasan la validación.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/Error'
+                  - $ref: '#/components/schemas/ValidationError'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/ServerErrorOrRateLimit'
+
+  /documents/{external_id}:
+    get:
+      operationId: getDocument
+      tags: [Comprobantes]
+      summary: Consultar un comprobante
+      description: |
+        Estado guardado del comprobante (no consulta a SUNAT en vivo; para eso usa
+        `POST /documents/{external_id}/consultar-sunat`). Incluye links de descarga. No consume crédito.
+      parameters:
+        - $ref: '#/components/parameters/ExternalId'
+        - $ref: '#/components/parameters/RucQuery'
+        - $ref: '#/components/parameters/XRucHeader'
+      responses:
+        '200':
+          description: Datos del comprobante.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentDetailResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RucForbidden'
+        '404':
+          $ref: '#/components/responses/DocumentNotFound'
+        '422':
+          $ref: '#/components/responses/RucRequired'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/ServerErrorOrRateLimit'
+
+  /documents/{external_id}/{type}:
+    get:
+      operationId: downloadDocumentFile
+      tags: [Comprobantes]
+      summary: Descargar PDF, XML o CDR
+      description: |
+        Descarga el PDF (formato A4, se regenera en cada descarga), el XML firmado o el CDR (ZIP de
+        SUNAT) del comprobante. No consume crédito. El PDF y el XML existen desde que el comprobante
+        se genera (incluso en estado `01`); el CDR solo cuando SUNAT respondió.
+        Si el comprobante o el archivo (PDF, XML o CDR) no existen, responde `404` JSON con
+        `codigo: NO_ENCONTRADO` (si falta el CDR, consulta a SUNAT con `/consultar-sunat` y reintenta).
+
+        Si tu cuenta tiene varios RUC, indica el emisor con `?ruc=20123456789` (o el header `X-RUC`);
+        sin él responde `422 RUC_REQUERIDO`. Basta el header `X-API-Key`: no hace falta un header
+        `Accept` especial (la respuesta trae el `Content-Type` del archivo; los errores siempre en JSON).
+      parameters:
+        - $ref: '#/components/parameters/ExternalId'
+        - name: type
+          in: path
+          required: true
+          description: Archivo a descargar.
+          schema:
+            type: string
+            enum: [pdf, xml, cdr]
+        - $ref: '#/components/parameters/RucQuery'
+        - $ref: '#/components/parameters/XRucHeader'
+      responses:
+        '200':
+          description: El archivo, como adjunto.
+          content:
+            application/pdf:
+              schema: { type: string, contentMediaType: application/pdf }
+            application/xml:
+              schema: { type: string }
+            application/zip:
+              schema: { type: string, contentMediaType: application/zip }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RucForbidden'
+        '404':
+          description: Comprobante no encontrado, o PDF/XML/CDR inexistente en el servidor.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                comprobante:
+                  value: { success: false, message: 'Comprobante no encontrado.', codigo: NO_ENCONTRADO, reintentable: false }
+                cdr:
+                  value: { success: false, message: 'El CDR de este comprobante no está disponible todavía. Consulta a SUNAT con POST /documents/{external_id}/consultar-sunat y vuelve a intentar.', codigo: NO_ENCONTRADO, reintentable: false }
+        '422':
+          $ref: '#/components/responses/RucRequired'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/ServerErrorOrRateLimit'
+
+  /documents/{external_id}/reenviar:
+    post:
+      operationId: resendDocument
+      tags: [Comprobantes]
+      summary: Reenviar a SUNAT
+      description: |
+        Reintenta el envío del mismo comprobante (sin crear uno nuevo ni gastar correlativo). Pensado para
+        estados `01` y `09`. No consume crédito. `success: true` significa que el reintento se ejecutó;
+        revisa `aceptado_por_sunat`. Si el reintento falla responde `422` **con el mismo cuerpo**
+        (`success: false`, `mensaje`, `estado`...) más los campos de error comunes `message`, `codigo`
+        (`RECHAZADO_SUNAT`, `SUNAT_NO_DISPONIBLE` o `REENVIO_FALLIDO`) y `reintentable`.
+      parameters:
+        - $ref: '#/components/parameters/ExternalId'
+        - $ref: '#/components/parameters/XRucHeader'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RucOnlyBody'
+            example: { ruc: "20123456789" }
+      responses:
+        '200':
+          description: Reintento ejecutado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResendResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RucForbiddenOrTestKey'
+        '404':
+          $ref: '#/components/responses/DocumentNotFound'
+        '422':
+          description: Falta el RUC (formato `Error`) o el reintento falló (formato `ResendResponse` con `success:false`, más `message`, `codigo` y `reintentable`).
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/ResendResponse'
+                  - $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/ServerErrorOrRateLimit'
+
+  /documents/{external_id}/consultar-sunat:
+    post:
+      operationId: querySunatStatus
+      tags: [Comprobantes]
+      summary: Consultar estado real en SUNAT
+      description: |
+        Pregunta a SUNAT en vivo por el comprobante (consulta de CDR), sincroniza el estado y lo devuelve.
+        Útil cuando el envío quedó en el aire. No consume crédito.
+
+        **Solo funciona con RUC en producción.** SUNAT no ofrece este servicio de consulta en su
+        entorno de pruebas (beta): con un RUC en modo prueba la respuesta es `422` con
+        "No se pudo consultar a SUNAT: ... Unauthorized". En pruebas usa `POST /documents/{external_id}/reenviar`.
+      parameters:
+        - $ref: '#/components/parameters/ExternalId'
+        - $ref: '#/components/parameters/XRucHeader'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RucOnlyBody'
+            example: { ruc: "20123456789" }
+      responses:
+        '200':
+          description: Consulta realizada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuerySunatResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RucForbiddenOrTestKey'
+        '404':
+          $ref: '#/components/responses/DocumentNotFound'
+        '422':
+          description: 'Falta el RUC o la consulta a SUNAT falló (`No se pudo consultar a SUNAT: ...`).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/ServerErrorOrRateLimit'
+
+  /documents/{external_id}/historial:
+    get:
+      operationId: getDocumentHistory
+      tags: [Comprobantes]
+      summary: Historial del comprobante
+      description: Línea de tiempo del comprobante (creación, cambios de estado, respuestas de SUNAT, reintentos, errores). No consume crédito.
+      parameters:
+        - $ref: '#/components/parameters/ExternalId'
+        - $ref: '#/components/parameters/RucQuery'
+        - $ref: '#/components/parameters/XRucHeader'
+      responses:
+        '200':
+          description: Historial.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HistoryResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RucForbidden'
+        '404':
+          $ref: '#/components/responses/DocumentNotFound'
+        '422':
+          $ref: '#/components/responses/RucRequired'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/ServerErrorOrRateLimit'
+
+  /anulaciones:
+    post:
+      operationId: voidDocument
+      tags: [Anulaciones]
+      summary: Anular comprobantes (facturas o boletas)
+      description: |
+        Anula comprobantes ante SUNAT y devuelve un `ticket` para consultar el resultado. Es asíncrono:
+        el comprobante pasa a `13` (por anular) y queda en `11` (anulado) cuando SUNAT acepta.
+        Cuesta 1 crédito (se devuelve si el envío falla; gratis en RUCs demo).
+
+        La API elige el camino según lo que mandes:
+
+        | Mandas | SUNAT lo anula con | `tipo` en la respuesta | `identificador` |
+        |---|---|---|---|
+        | Facturas y sus notas | Comunicación de baja | `baja` | `RA-AAAAMMDD-N` |
+        | Boletas y sus notas | Resumen diario de anulación | `resumen` | `RC-AAAAMMDD-N` |
+        | Las dos cosas juntas | — | `422 ANULACION_MIXTA` | — |
+
+        - Boletas: solo se anulan las **aceptadas** por SUNAT (estado `05`). Otra → `422 DATOS_INVALIDOS`.
+        - No mezcles facturas y boletas en la misma petición: haz una petición para cada tipo.
+        - `fecha_de_emision_de_documentos` en formato **DD-MM-AAAA** y debe ser **exactamente** la
+          fecha de emisión de cada comprobante listado (todos deben compartirla).
+        - Plazo: el que tenga configurado la empresa para anular (por defecto **7 días** desde la
+          emisión, el plazo de SUNAT). Fuera de plazo → `422` (`El documento excede los 7 días válidos para ser anulado.`).
+        - Requiere certificado digital configurado en el RUC (o envío por PSE).
+        - Cada comprobante deja en su historial el evento `anulacion_enviada` (con tipo, ticket e identificador).
+      parameters:
+        - $ref: '#/components/parameters/XRucHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VoidRequest'
+            example:
+              ruc: "20123456789"
+              fecha_de_emision_de_documentos: "08-07-2026"
+              documentos:
+                - external_id: 9822f52c-108e-47ff-9d2e-5f0c3c1a7b11
+                  motivo_anulacion: Error en el comprobante
+      responses:
+        '200':
+          description: Anulación enviada a SUNAT (comunicación de baja o resumen de boletas).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoidResponse'
+              examples:
+                facturaProduccion:
+                  summary: Factura en un RUC en producción (comunicación de baja)
+                  value:
+                    success: true
+                    message: Anulación enviada a SUNAT. Consulta el resultado con el ticket.
+                    tipo: baja
+                    ticket: "1792012278123"
+                    external_id: 5b1d0e7a-3c2f-4a51-9d1e-2f6a7c8b9d10
+                    identificador: RA-20261014-1
+                    creditos_restantes: 4829
+                    credito_cobrado: true
+                boletaDemo:
+                  summary: Boleta en un RUC demo (resumen diario, sin costo)
+                  value:
+                    success: true
+                    message: Anulación enviada a SUNAT. Consulta el resultado con el ticket.
+                    tipo: resumen
+                    ticket: "1792012278669"
+                    external_id: 87c0049e-1225-43af-8a0a-7d2a7d8d32ab
+                    identificador: RC-20261014-1
+                    creditos_restantes: 14945
+                    credito_cobrado: false
+                    modo_demo: true
+                    pruebas_restantes_hoy: 197
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/NoCredits'
+        '403':
+          $ref: '#/components/responses/RucForbiddenOrTestKey'
+        '422':
+          description: |
+            Falta el RUC, facturas y boletas mezcladas (`ANULACION_MIXTA`), payload inválido (p. ej.
+            `El código externo ... no fue encontrado o la fecha indica no corresponde al documento.`),
+            boleta no aceptada, fuera de plazo, certificado no encontrado, o error al generar/enviar
+            la anulación. El crédito no se cobra.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                mixta:
+                  summary: Facturas y boletas en la misma petición
+                  value:
+                    success: false
+                    message: 'No se pueden anular facturas y boletas en la misma petición: SUNAT las anula por caminos distintos (comunicación de baja para facturas, resumen diario para boletas). Envía una petición para las facturas y otra para las boletas.'
+                    codigo: ANULACION_MIXTA
+                    reintentable: false
+                boletaNoAceptada:
+                  summary: Boleta que no está aceptada por SUNAT
+                  value:
+                    success: false
+                    message: 'La boleta BA01-72 no se puede anular: su estado es "Anulado". Solo se anulan boletas aceptadas por SUNAT (estado 05).'
+                    codigo: DATOS_INVALIDOS
+                    reintentable: false
+                fueraDePlazo:
+                  summary: Fuera del plazo de anulación
+                  value:
+                    success: false
+                    message: El documento excede los 7 días válidos para ser anulado.
+                    codigo: DATOS_INVALIDOS
+                    reintentable: false
+        '429':
+          $ref: '#/components/responses/RateLimitedOrDemoLimit'
+        '500':
+          $ref: '#/components/responses/ServerErrorOrRateLimit'
+
+  /anulaciones/{ticket}/status:
+    get:
+      operationId: getVoidStatus
+      tags: [Anulaciones]
+      summary: Estado de una anulación
+      description: |
+        Consulta el resultado de la anulación (comunicación de baja o resumen de boletas) asociada al
+        ticket. Si SUNAT ya respondió, devuelve esa respuesta guardada sin volver a preguntar. No
+        consume crédito.
+
+        - `estado` es el de la anulación: `05` aceptada por SUNAT, `09` rechazada, `03` enviada.
+        - `documentos[].estado` es el de cada comprobante: `11` anulado, `13` todavía por anular.
+        - Si SUNAT rechaza un resumen de boletas, las boletas vuelven a `01`.
+      parameters:
+        - name: ticket
+          in: path
+          required: true
+          description: Ticket devuelto por `POST /anulaciones`.
+          schema: { type: string }
+        - $ref: '#/components/parameters/RucQuery'
+        - $ref: '#/components/parameters/XRucHeader'
+      responses:
+        '200':
+          description: Resultado de la consulta.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoidStatusResponse'
+              example:
+                success: true
+                tipo: resumen
+                ticket: "1792012278669"
+                estado: "05"
+                external_id: 87c0049e-1225-43af-8a0a-7d2a7d8d32ab
+                documentos:
+                  - external_id: a3af5a50-dfe9-41e9-a4be-6de52c0b5c61
+                    serie_numero: BA01-72
+                    estado: "11"
+                sunat:
+                  sent: true
+                  code: "0"
+                  description: El Resumen diario RC-20261014-1, ha sido aceptado
+                  notes: []
+                  is_accepted: true
+                  status_code: 0
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RucForbidden'
+        '404':
+          description: No existe una anulación con ese ticket.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example: { success: false, message: 'Anulación no encontrada para ese ticket.', codigo: NO_ENCONTRADO, reintentable: false }
+        '422':
+          description: Falta el RUC o la consulta a SUNAT falló.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/ServerErrorOrRateLimit'
+
+  /guias:
+    post:
+      operationId: emitDispatchGuide
+      tags: [Guías de remisión]
+      summary: Emitir guía de remisión (GRE 2.0)
+      description: |
+        Genera, firma y crea el PDF de la guía; luego la envía a SUNAT (proceso asíncrono). Cuesta
+        1 crédito solo si el envío a SUNAT tiene éxito; si no se pudo enviar, la guía queda creada,
+        `enviado` es `false` y el crédito se devuelve (respuesta `200`).
+
+        - Requiere certificado digital y credenciales GRE de SUNAT configurados en el RUC.
+        - Envía siempre `serie_documento` (ej. `TA01` remitente, `VA01` transportista).
+        - El establecimiento se indica con `datos_del_emisor.codigo_del_domicilio_fiscal` (no con
+          `codigo_establecimiento`).
+        - Para `09` (remitente) el bloque `datos_del_cliente_o_receptor` es obligatorio.
+        - No usa `Idempotency-Key`.
+      parameters:
+        - $ref: '#/components/parameters/XRucHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DispatchGuideRequest'
+            examples:
+              remitenteTransportePrivado:
+                summary: Guía del remitente, transporte privado
+                value:
+                  ruc: "20123456789"
+                  serie_documento: TA01
+                  numero_documento: "#"
+                  fecha_de_emision: "2026-07-08"
+                  hora_de_emision: "10:30:00"
+                  codigo_tipo_documento: "09"
+                  datos_del_emisor: { codigo_del_domicilio_fiscal: "0000" }
+                  datos_del_cliente_o_receptor:
+                    codigo_tipo_documento_identidad: "6"
+                    numero_documento: "20555555555"
+                    apellidos_y_nombres_o_razon_social: EMPRESA DESTINO S.A.C.
+                  codigo_motivo_traslado: "01"
+                  descripcion_motivo_traslado: Venta
+                  fecha_de_traslado: "2026-07-08"
+                  peso_total: 50
+                  unidad_peso_total: KGM
+                  numero_de_bultos: 2
+                  codigo_modo_transporte: "02"
+                  direccion_partida:
+                    ubigeo: "150101"
+                    direccion: Av. Partida 123 - Lima
+                    codigo_del_domicilio_fiscal: "0000"
+                  direccion_llegada:
+                    ubigeo: "150203"
+                    direccion: Av. Llegada 456 - Barranca
+                    codigo_del_domicilio_fiscal: "-"
+                  vehiculo: { numero_de_placa: ABC123 }
+                  chofer:
+                    codigo_tipo_documento_identidad: "1"
+                    numero_documento: "12345678"
+                    nombres: Juan Pérez
+                    numero_licencia: Q12345678
+                  items:
+                    - codigo_interno: PROD-001
+                      descripcion: Producto trasladado
+                      unidad_de_medida: NIU
+                      cantidad: 10
+      responses:
+        '200':
+          description: Guía creada (revisa `enviado`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DispatchResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/NoCredits'
+        '403':
+          $ref: '#/components/responses/RucForbiddenOrTestKey'
+        '422':
+          description: Falta el RUC, payload inválido, certificado no encontrado o error al generar la guía.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimitedOrDemoLimit'
+        '500':
+          $ref: '#/components/responses/ServerErrorOrRateLimit'
+
+  /guias/{external_id}/status:
+    get:
+      operationId: getDispatchGuideStatus
+      tags: [Guías de remisión]
+      summary: Estado de una guía
+      description: Consulta a SUNAT el ticket de envío de la guía y devuelve su estado. No consume crédito.
+      parameters:
+        - $ref: '#/components/parameters/ExternalId'
+        - $ref: '#/components/parameters/RucQuery'
+        - $ref: '#/components/parameters/XRucHeader'
+      responses:
+        '200':
+          description: Estado de la guía.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DispatchStatusResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RucForbidden'
+        '404':
+          description: Guía no encontrada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example: { success: false, message: 'Guía no encontrada.', codigo: NO_ENCONTRADO, reintentable: false }
+        '422':
+          description: Falta el RUC o la consulta a SUNAT falló.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/ServerErrorOrRateLimit'
+
+  /rucs:
+    get:
+      operationId: listRucs
+      tags: [RUCs]
+      summary: Listar RUCs de la cuenta
+      description: RUCs enlazados a la cuenta con su entorno (`demo`/`produccion`) y si están activos. No consume crédito.
+      responses:
+        '200':
+          description: Lista de RUCs.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RucListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/ServerErrorOrRateLimit'
+    post:
+      operationId: createRuc
+      tags: [RUCs]
+      summary: Crear un RUC
+      description: |
+        Da de alta un RUC nuevo enlazado a la cuenta (nace en modo prueba/demo). Idempotente: si el RUC
+        ya pertenece a esta cuenta devuelve `200` con `ya_existia: true`. Si pertenece a otra cuenta →
+        `409`. No consume crédito.
+
+        **Tope de RUCs (ampliable).** Cada cuenta empieza con un tope de **50 RUCs**. Es solo un freno
+        de seguridad (que un error en tu sistema no cree empresas en masa), no un límite comercial.
+        Al alcanzarlo, esta llamada responde `422` (`codigo: DATOS_INVALIDOS`) con el mensaje
+        "Alcanzaste el máximo de N RUCs…". Lo amplías tú mismo, sin costo, de 50 en 50 desde tu portal
+        de integrador: **Empresas → Ampliar límite (+50)**.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRucRequest'
+            example:
+              ruc: "20609999991"
+              empresa: Mi Cliente SAC
+              correo: contacto@micliente.pe
+              clave: una-clave-de-al-menos-6-caracteres
+      responses:
+        '200':
+          description: El RUC ya existía en esta cuenta.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateRucResponse'
+        '201':
+          description: RUC creado en modo demo.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateRucResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: El RUC ya está registrado con otra cuenta.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example: { success: false, message: 'Ese RUC ya está registrado en el sistema (con otra cuenta).', codigo: CONFLICTO, reintentable: false }
+        '422':
+          description: Validación fallida, tope de RUCs alcanzado o error al crear el tenant.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/Error'
+                  - $ref: '#/components/schemas/ValidationError'
+              examples:
+                topeAlcanzado:
+                  summary: Tope de RUCs alcanzado (amplíalo desde el portal)
+                  value: { success: false, message: 'Alcanzaste el máximo de 50 RUCs. Amplíalo tú mismo desde tu portal de integrador (Empresas → Ampliar límite).', codigo: DATOS_INVALIDOS, reintentable: false }
+        '500':
+          description: Plan de integradores no configurado en el servidor o error interno.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /rucs/{ruc}/activation:
+    patch:
+      operationId: setRucActivation
+      tags: [RUCs]
+      summary: Activar o desactivar un RUC
+      description: |
+        Desactiva (`activo: false`) o reactiva (`activo: true`) un RUC de la cuenta. Un RUC desactivado
+        no puede emitir, consultar ni descargar nada por la API ni por su panel. Reversible; no borra
+        datos. No existe endpoint para eliminar un RUC.
+      parameters:
+        - name: ruc
+          in: path
+          required: true
+          description: RUC de 11 dígitos enlazado a la cuenta.
+          schema: { type: string, pattern: '^\d{11}$' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RucActivationRequest'
+            example: { activo: false }
+      responses:
+        '200':
+          description: Estado actualizado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RucActivationResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/TestKeyInProduction'
+        '404':
+          description: El RUC no pertenece a la cuenta o no existe.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example: { success: false, message: 'Ese RUC no pertenece a esta cuenta o no existe.', codigo: NO_ENCONTRADO, reintentable: false }
+        '422':
+          $ref: '#/components/responses/LaravelValidation'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/ServerErrorOrRateLimit'
+
+  /calcular:
+    post:
+      operationId: calculateDocument
+      tags: [Herramientas]
+      summary: Calcular importes (items y totales) sin emitir
+      description: |
+        Arma `items` y `totales` listos para copiar tal cual en `POST /documents`, para que no tengas
+        que calcular el IGV a mano. **No emite nada ni consume crédito** y no necesita RUC (aunque
+        mandes `ruc` o `X-RUC`, no se usa).
+
+        Da exactamente el mismo resultado que `calcularComprobante()` / `calcular_comprobante()` de
+        los SDK: redondeo half-up a 2 decimales por ítem y aritmética decimal exacta.
+
+        - Con `valor_unitario` (sin IGV): `base = redondeo(valor × cantidad)`,
+          `igv = redondeo(base × porcentaje)`, `total = base + igv`.
+        - Con `precio_unitario` (con IGV) se respeta lo que paga el cliente:
+          `total = redondeo(precio × cantidad)`, `base = redondeo(total ÷ (1 + porcentaje))`,
+          `igv = total − base`. Así 3 menús de S/ 10.00 suman S/ 30.00 y no S/ 29.99.
+        - Afectación `40` (exportación) suma en `total_exportacion` con IGV 0. Una exportación
+          necesita factura con `codigo_tipo_operacion` `0200`.
+        - **Descuentos: todavía no.** Si mandas `descuento` en un ítem → `422`. Envía el precio ya
+          descontado.
+        - Para otras afectaciones (gratuitas, ISC, ICBPER…) arma el ítem a mano.
+
+        Flujo típico: `POST /calcular` → copia `items` y `totales` → `POST /documents` con tu cabecera.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CalculateRequest'
+            examples:
+              casoComun:
+                summary: Gravado, exonerado, inafecto y exportación (valor sin IGV)
+                value:
+                  items:
+                    - { descripcion: A, cantidad: 3, valor_unitario: 10.555, afectacion: "10" }
+                    - { descripcion: B, cantidad: 2, valor_unitario: 5, afectacion: "20" }
+                    - { descripcion: C, cantidad: 1, valor_unitario: 7.1, afectacion: "30" }
+                    - { descripcion: D, cantidad: 1, valor_unitario: 100, afectacion: "40" }
+              precioConIgv:
+                summary: Precio con IGV (lo que paga el cliente)
+                value:
+                  items:
+                    - { codigo_interno: M1, descripcion: Menu, cantidad: 3, precio_unitario: 10, afectacion: "10", unidad_de_medida: ZZ }
+              tasaReducida:
+                summary: Tasa reducida Ley 31556 (10.5 %)
+                value:
+                  porcentaje_igv: 10.5
+                  items:
+                    - { descripcion: Menu, cantidad: 1, valor_unitario: 100, afectacion: "10" }
+      responses:
+        '200':
+          description: Items y totales calculados, listos para `POST /documents`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CalculateResponse'
+              examples:
+                casoComun:
+                  summary: Respuesta del caso común
+                  value:
+                    success: true
+                    items:
+                      - { descripcion: A, unidad_de_medida: NIU, cantidad: 3, valor_unitario: 10.56, codigo_tipo_precio: "01", precio_unitario: 12.45, codigo_tipo_afectacion_igv: "10", total_base_igv: 31.67, porcentaje_igv: 18, total_igv: 5.7, total_impuestos: 5.7, total_valor_item: 31.67, total_item: 37.37 }
+                      - { descripcion: B, unidad_de_medida: NIU, cantidad: 2, valor_unitario: 5, codigo_tipo_precio: "01", precio_unitario: 5, codigo_tipo_afectacion_igv: "20", total_base_igv: 10, porcentaje_igv: 0, total_igv: 0, total_impuestos: 0, total_valor_item: 10, total_item: 10 }
+                      - { descripcion: C, unidad_de_medida: NIU, cantidad: 1, valor_unitario: 7.1, codigo_tipo_precio: "01", precio_unitario: 7.1, codigo_tipo_afectacion_igv: "30", total_base_igv: 7.1, porcentaje_igv: 0, total_igv: 0, total_impuestos: 0, total_valor_item: 7.1, total_item: 7.1 }
+                      - { descripcion: D, unidad_de_medida: NIU, cantidad: 1, valor_unitario: 100, codigo_tipo_precio: "01", precio_unitario: 100, codigo_tipo_afectacion_igv: "40", total_base_igv: 100, porcentaje_igv: 0, total_igv: 0, total_impuestos: 0, total_valor_item: 100, total_item: 100 }
+                    totales:
+                      total_operaciones_gravadas: 31.67
+                      total_operaciones_exoneradas: 10
+                      total_operaciones_inafectas: 7.1
+                      total_exportacion: 100
+                      total_igv: 5.7
+                      total_impuestos: 5.7
+                      total_valor: 148.77
+                      total_venta: 154.47
+                precioConIgv:
+                  summary: Respuesta con precio con IGV (3 × S/ 10.00 = S/ 30.00)
+                  value:
+                    success: true
+                    items:
+                      - { codigo_interno: M1, descripcion: Menu, unidad_de_medida: ZZ, cantidad: 3, valor_unitario: 8.47, codigo_tipo_precio: "01", precio_unitario: 10, codigo_tipo_afectacion_igv: "10", total_base_igv: 25.42, porcentaje_igv: 18, total_igv: 4.58, total_impuestos: 4.58, total_valor_item: 25.42, total_item: 30 }
+                    totales:
+                      total_operaciones_gravadas: 25.42
+                      total_operaciones_exoneradas: 0
+                      total_operaciones_inafectas: 0
+                      total_exportacion: 0
+                      total_igv: 4.58
+                      total_impuestos: 4.58
+                      total_valor: 25.42
+                      total_venta: 30
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          description: El plan de la cuenta venció (`PLAN_VENCIDO`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example: { success: false, message: 'El plan de tu cuenta venció. Renuévalo para volver a emitir.', codigo: PLAN_VENCIDO, reintentable: false }
+        '422':
+          description: Datos inválidos. El detalle por ítem viene en `campos` (clave `items.N.campo`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ToolValidationError'
+              examples:
+                camposInvalidos:
+                  value:
+                    success: false
+                    message: 'Datos inválidos: Falta la descripción. cantidad debe ser un número mayor que 0.'
+                    codigo: DATOS_INVALIDOS
+                    reintentable: false
+                    campos:
+                      items.0.descripcion: [Falta la descripción.]
+                      items.0.cantidad: [cantidad debe ser un número mayor que 0.]
+                sinItems:
+                  value:
+                    success: false
+                    message: 'Datos inválidos: Envía "items": una lista con al menos un producto o servicio.'
+                    codigo: DATOS_INVALIDOS
+                    reintentable: false
+                    campos:
+                      items: ['Envía "items": una lista con al menos un producto o servicio.']
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/ServerErrorOrRateLimit'
+
+  /catalogos:
+    get:
+      operationId: listCatalogs
+      tags: [Herramientas]
+      summary: Listar catálogos SUNAT disponibles
+      description: |
+        Lista los catálogos SUNAT que puedes consultar con `GET /catalogos/{nombre}`. No consume crédito.
+
+        | Nombre | Catálogo SUNAT | Contenido | Campos extra |
+        |---|---|---|---|
+        | `tipos-documento` | 01 | Tipos de comprobante | `abreviatura` |
+        | `monedas` | 02 | Monedas | `simbolo` |
+        | `unidades` | 03 | Unidades de medida | `simbolo` |
+        | `documentos-identidad` | 06 | Tipos de documento de identidad | — |
+        | `afectacion-igv` | 07 | Afectación del IGV | `es_exportacion`, `es_gratuito` |
+        | `motivos-nota-credito` | 09 | Motivos de nota de crédito | — |
+        | `motivos-nota-debito` | 10 | Motivos de nota de débito | — |
+        | `modalidad-transporte` | 18 | Modalidad de transporte (guías) | — |
+        | `motivos-traslado` | 20 | Motivos de traslado (guías) | — |
+        | `tipos-operacion` | 51 | Tipos de operación | `es_exportacion` |
+        | `detracciones` | 54 | Bienes y servicios sujetos a detracción | `porcentaje` |
+
+        El código de producto SUNAT (UNSPSC, catálogo 25) no está: envía el código de 8 dígitos en
+        `codigo_producto_sunat` del ítem si lo necesitas.
+
+        Acepta `?ruc=` / `X-RUC` como el resto de endpoints, pero la lista es la misma para todos los
+        RUC: el RUC solo cambia las filas de `GET /catalogos/{nombre}`. Si lo mandas, debe ser de tu
+        cuenta (si no, `403 RUC_NO_AUTORIZADO`).
+      parameters:
+        - $ref: '#/components/parameters/RucQuery'
+        - $ref: '#/components/parameters/XRucHeader'
+      responses:
+        '200':
+          description: Lista de catálogos.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogListResponse'
+              example:
+                success: true
+                catalogos:
+                  - { nombre: tipos-documento, catalogo_sunat: "01", descripcion: Tipos de comprobante, url: /api/v1/issuer/catalogos/tipos-documento }
+                  - { nombre: monedas, catalogo_sunat: "02", descripcion: Monedas, url: /api/v1/issuer/catalogos/monedas }
+                  - { nombre: unidades, catalogo_sunat: "03", descripcion: Unidades de medida, url: /api/v1/issuer/catalogos/unidades }
+                nota: 'Código de producto SUNAT (UNSPSC, catálogo 25): el sistema no tiene esa tabla; envía el código de 8 dígitos en "codigo_producto_sunat" del ítem si lo necesitas.'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          description: El plan de la cuenta venció (`PLAN_VENCIDO`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example: { success: false, message: 'El plan de tu cuenta venció. Renuévalo para volver a emitir.', codigo: PLAN_VENCIDO, reintentable: false }
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/ServerErrorOrRateLimit'
+
+  /catalogos/{nombre}:
+    get:
+      operationId: getCatalog
+      tags: [Herramientas]
+      summary: Filas de un catálogo SUNAT
+      description: |
+        Devuelve las filas de un catálogo. No consume crédito. Se guarda en caché 12 horas.
+
+        - `{nombre}`: el nombre (`unidades`) o el número SUNAT (`03`); `/catalogos/07` = `/catalogos/afectacion-igv`.
+        - `?q=` filtra por código o descripción (máx. 100 caracteres).
+        - Con `X-RUC` / `?ruc=` lee el catálogo de ese RUC (cada empresa puede tener filas
+          desactivadas). Sin RUC se usa el primer RUC de la cuenta.
+        - Cada fila trae `codigo`, `descripcion`, `activo` y los campos extra del catálogo. **Usa solo
+          las filas con `activo: true`**: el RUC valida contra ellas al emitir.
+      parameters:
+        - name: nombre
+          in: path
+          required: true
+          description: Nombre del catálogo o su número SUNAT (ver `GET /catalogos`).
+          schema:
+            type: string
+            examples: [unidades]
+          example: unidades
+        - name: q
+          in: query
+          required: false
+          description: Filtro por código o descripción (no distingue mayúsculas). Máx. 100 caracteres.
+          schema: { type: string, maxLength: 100 }
+          example: kilo
+        - $ref: '#/components/parameters/RucQuery'
+        - $ref: '#/components/parameters/XRucHeader'
+      responses:
+        '200':
+          description: Filas del catálogo.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogResponse'
+              examples:
+                unidades:
+                  summary: GET /catalogos/unidades?q=kilo
+                  value:
+                    success: true
+                    catalogo: unidades
+                    catalogo_sunat: "03"
+                    descripcion: Unidades de medida
+                    total: 2
+                    datos:
+                      - { codigo: KGM, descripcion: Kilos, activo: true, simbolo: KG }
+                      - { codigo: KWH, descripcion: Kilovatio hora, activo: false, simbolo: KWxH }
+                afectacionIgv:
+                  summary: GET /catalogos/07 (recortado)
+                  value:
+                    success: true
+                    catalogo: afectacion-igv
+                    catalogo_sunat: "07"
+                    descripcion: Tipos de afectación del IGV
+                    total: 19
+                    datos:
+                      - { codigo: "10", descripcion: Gravado - Operación Onerosa, activo: true, es_exportacion: false, es_gratuito: false }
+                      - { codigo: "11", descripcion: Gravado – Retiro por premio, activo: true, es_exportacion: false, es_gratuito: true }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          description: El plan de la cuenta venció (`PLAN_VENCIDO`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example: { success: false, message: 'El plan de tu cuenta venció. Renuévalo para volver a emitir.', codigo: PLAN_VENCIDO, reintentable: false }
+        '403':
+          $ref: '#/components/responses/RucForbidden'
+        '404':
+          description: El catálogo no existe. Trae la lista en `catalogos_disponibles`.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Error'
+                  - type: object
+                    properties:
+                      catalogos_disponibles:
+                        type: array
+                        items: { type: string }
+              example:
+                catalogos_disponibles: [tipos-documento, monedas, unidades, documentos-identidad, afectacion-igv, motivos-nota-credito, motivos-nota-debito, modalidad-transporte, motivos-traslado, tipos-operacion, detracciones]
+                success: false
+                message: 'Catálogo "noexiste" no existe. Lista disponible en GET /catalogos.'
+                codigo: NO_ENCONTRADO
+                reintentable: false
+        '422':
+          description: |
+            `q` demasiado largo (`DATOS_INVALIDOS`), o la cuenta todavía no tiene ningún RUC
+            (`RUC_REQUERIDO`; crea uno con `POST /rucs`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                success: false
+                message: 'Tu cuenta todavía no tiene ningún RUC enlazado: los catálogos se leen del sistema de facturación de tu RUC. Crea uno con POST /rucs.'
+                codigo: RUC_REQUERIDO
+                reintentable: false
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/ServerErrorOrRateLimit'
+
+webhooks:
+  comprobanteEstado:
+    post:
+      operationId: webhookComprobanteEstado
+      tags: [Webhooks]
+      summary: Aviso de cambio de estado de un comprobante
+      description: |
+        **FactuSmart llama a TU servidor** (no es un endpoint que tú llames). Se envía cuando un
+        comprobante **emitido por el API** pasa a `05` Aceptado (`comprobante.aceptado`), `07` Observado
+        (`comprobante.observado`), `09` Rechazado (`comprobante.rechazado`) u `11` Anulado
+        (`comprobante.anulado`). El botón **Enviar prueba** del portal manda el evento `prueba`
+        (un solo intento, sin reintentos). Los comprobantes emitidos desde el panel web no generan aviso.
+
+        **Configuración:** solo desde el portal del integrador, pestaña **Webhooks**: una URL por cuenta
+        (recibes los avisos de todos tus RUCs), debe ser `https://` y pública (no se aceptan `localhost`,
+        IPs privadas ni de metadatos de nube). Al guardarla se genera un secreto `whsec_…`, que puedes
+        regenerar cuando quieras. Para desactivarlo, deja la URL vacía y guarda.
+
+        **Verificar la firma:** `X-FactuSmart-Firma` es el HMAC-SHA256 en hexadecimal del **cuerpo crudo**
+        (tal cual llega, sin volver a serializarlo) usando tu secreto. Compáralo en tiempo constante; si no
+        coincide, responde `401` e ignora el aviso. Con los SDK:
+
+        - Node: `FactuSmart.verificarFirmaWebhook(cuerpoCrudo, firma, secreto)` → `boolean`
+        - PHP: `\FactuSmart\Cliente::verificarFirmaWebhook($cuerpoCrudo, $firma, $secreto)` → `bool`
+        - Python: `factusmart.verificar_firma_webhook(cuerpo_crudo, firma, secreto)` → `bool`
+
+        **Reintentos:** si tu servidor no responde `2xx` en **8 segundos** (error, timeout, conexión
+        rechazada o una redirección `301`/`302`, que no se sigue), se reintenta con espera creciente:
+        **6 intentos en total** — inmediato, +1 min, +5 min, +30 min, +2 h y +6 h. Si fallan todos, el
+        aviso queda como **Error** en el portal (**Webhooks → Últimas entregas**, 50 más recientes, 30
+        días de historial) y puedes seguir consultando `GET /documents/{external_id}`. El `id` es el
+        mismo en todos los reintentos: guárdalo para no procesar dos veces el mismo aviso. Si el proceso
+        es largo, responde `200` de inmediato y procésalo después. El envío no retrasa la emisión.
+      security: []
+      parameters:
+        - name: X-FactuSmart-Evento
+          in: header
+          required: true
+          description: Tipo de evento (igual que `evento` del cuerpo).
+          schema: { $ref: '#/components/schemas/WebhookEvento' }
+        - name: X-FactuSmart-Id
+          in: header
+          required: true
+          description: Identificador único del aviso (igual que `id` del cuerpo). No cambia entre reintentos.
+          schema: { type: string, format: uuid }
+        - name: X-FactuSmart-Intento
+          in: header
+          required: true
+          description: Número de intento, de `1` a `6`.
+          schema: { type: string, examples: ['1'] }
+        - name: X-FactuSmart-Firma
+          in: header
+          required: true
+          description: HMAC-SHA256 en hexadecimal del cuerpo crudo, con tu secreto `whsec_…`.
+          schema: { type: string, pattern: '^[0-9a-f]{64}$' }
+        - name: User-Agent
+          in: header
+          required: true
+          schema: { type: string, const: FactuSmart-Webhooks/1.0 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookComprobante'
+            example:
+              id: 0fbb616d-ec40-4bbd-a89f-591d9d404630
+              evento: comprobante.aceptado
+              ruc: "20777666555"
+              external_id: ad4d29e9-7510-4efd-963e-3f8b6fa2facd
+              serie_numero: BA01-35
+              tipo_documento: "03"
+              estado: "05"
+              estado_descripcion: Aceptado
+              aceptado_por_sunat: true
+              entorno: prueba
+              sunat: { codigo: "0", descripcion: "La Boleta numero BA01-35, ha sido aceptada" }
+              fecha: "2026-10-14T15:29:43-05:00"
+      responses:
+        '200':
+          description: |
+            Aviso recibido. Cualquier `2xx` cuenta como entregado; el cuerpo de tu respuesta se ignora.
+            Cualquier otro código (o no responder en 8 s) programa un reintento.
+
+components:
+  securitySchemes:
+    ApiKeyHeader:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: |
+        API key de la cuenta (panel de integrador, pestaña Configuración). Hay dos: la de producción
+        (64 letras y números) y una de prueba opcional que empieza con `fs_test_` y solo escribe en RUCs
+        en modo demo. Ver "Llave de prueba y llave de producción".
+    BearerApiKey:
+      type: http
+      scheme: bearer
+      description: Alternativa aceptada por el middleware, `Authorization Bearer` con la misma API key. Solo se usa si no hay `X-API-Key`.
+
+  parameters:
+    RucQuery:
+      name: ruc
+      in: query
+      required: false
+      description: RUC emisor (11 dígitos). Obligatorio si la cuenta tiene varios RUCs. También se acepta `emisor_ruc`.
+      schema: { type: string, pattern: '^\d{11}$' }
+    XRucHeader:
+      name: X-RUC
+      in: header
+      required: false
+      description: Alternativa al campo `ruc` (se usa solo si `ruc` y `emisor_ruc` no vienen).
+      schema: { type: string, pattern: '^\d{11}$' }
+    ExternalId:
+      name: external_id
+      in: path
+      required: true
+      description: Identificador (UUID) devuelto al emitir.
+      schema: { type: string, format: uuid }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Valor único por venta (ej. el id de la venta en tu sistema). Ver sección Idempotencia.
+      schema: { type: string }
+
+  responses:
+    Unauthorized:
+      description: API key ausente, inválida o cuenta desactivada.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            sinKey:
+              value: { success: false, message: 'API key requerida. Envíala en el header X-API-Key.', codigo: NO_AUTENTICADO, reintentable: false }
+            invalida:
+              value: { success: false, message: 'API key inválida o cuenta desactivada.', codigo: NO_AUTENTICADO, reintentable: false }
+    RucForbidden:
+      description: El RUC indicado no pertenece a la cuenta, o el RUC está desactivado.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            ajeno:
+              value: { success: false, message: 'El RUC indicado no pertenece a esta cuenta o no existe.', codigo: RUC_NO_AUTORIZADO, reintentable: false }
+            desactivado:
+              value: { success: false, message: "Este RUC está desactivado. Reactívalo con PATCH /rucs/{ruc}/activation antes de continuar.", codigo: RUC_DESACTIVADO, reintentable: false }
+    RucForbiddenOrTestKey:
+      description: |
+        El RUC no pertenece a la cuenta, está desactivado, o usaste la llave de prueba (`fs_test_…`) en
+        un RUC que está en producción (`LLAVE_DE_PRUEBA_EN_PRODUCCION`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            ajeno:
+              value: { success: false, message: 'El RUC indicado no pertenece a esta cuenta o no existe.', codigo: RUC_NO_AUTORIZADO, reintentable: false }
+            desactivado:
+              value: { success: false, message: "Este RUC está desactivado. Reactívalo con PATCH /rucs/{ruc}/activation antes de continuar.", codigo: RUC_DESACTIVADO, reintentable: false }
+            llavePrueba:
+              value: { success: false, message: 'Estás usando tu llave de PRUEBA y este RUC está en producción. La llave de prueba solo emite, anula y reenvía en RUCs en modo demo. Usa tu llave de producción.', codigo: LLAVE_DE_PRUEBA_EN_PRODUCCION, reintentable: false }
+    TestKeyInProduction:
+      description: Usaste la llave de prueba (`fs_test_…`) en un RUC que está en producción.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: { success: false, message: 'Estás usando tu llave de PRUEBA y este RUC está en producción. La llave de prueba solo emite, anula y reenvía en RUCs en modo demo. Usa tu llave de producción.', codigo: LLAVE_DE_PRUEBA_EN_PRODUCCION, reintentable: false }
+    RucWithoutTenant:
+      description: El RUC resuelto no tiene tenant asociado.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: { success: false, message: 'El RUC no tiene un tenant asociado.', codigo: RUC_SIN_TENANT, reintentable: false }
+    RucRequired:
+      description: No se pudo determinar el RUC emisor (cuenta con varios RUCs y no se indicó), o el RUC no tiene tenant.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: { success: false, message: 'Indica el RUC emisor en el campo "ruc".', codigo: RUC_REQUERIDO, reintentable: false }
+    DocumentNotFound:
+      description: No existe un comprobante con ese `external_id` en el RUC.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: { success: false, message: 'Comprobante no encontrado.', codigo: NO_ENCONTRADO, reintentable: false }
+    NoCredits:
+      description: Sin créditos disponibles. No se emitió ni envió nada.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/NoCreditsError'
+          example:
+            success: false
+            message: Sin créditos disponibles en la cuenta. Recargue para seguir emitiendo.
+            codigo: SIN_CREDITOS
+            reintentable: false
+            creditos_restantes: 0
+    LaravelValidation:
+      description: |
+        Validación por campo fallida (`codigo: DATOS_INVALIDOS`). El detalle está en `campos`. Por
+        compatibilidad, el mismo mapa también va en la raíz (con `Accept: application/json`) o dentro de
+        `message` (sin ese header).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ValidationError'
+          example:
+            activo: [El campo activo es obligatorio.]
+            success: false
+            message: 'Datos inválidos: El campo activo es obligatorio.'
+            campos: { activo: [El campo activo es obligatorio.] }
+            codigo: DATOS_INVALIDOS
+            reintentable: false
+    RateLimited:
+      description: |
+        Límite de peticiones superado (120/min por API key, 60/min por IP). Espera los segundos
+        indicados en `Retry-After` (o `retry_after`) y reintenta.
+      headers:
+        Retry-After:
+          description: Segundos a esperar antes de reintentar.
+          schema: { type: integer }
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/Error'
+              - type: object
+                properties:
+                  retry_after: { type: integer }
+          example:
+            success: false
+            message: Demasiadas peticiones. Espera 40 segundos e intenta de nuevo.
+            retry_after: 40
+            codigo: LIMITE_PETICIONES
+            reintentable: true
+    RateLimitedOrDemoLimit:
+      description: |
+        Dos casos con el mismo HTTP 429, distínguelos por `codigo`:
+
+        - `LIMITE_PETICIONES` (reintentable): superaste 120/min por API key o 60/min por IP. Espera
+          `Retry-After` segundos.
+        - `LIMITE_PRUEBAS_DIARIO` (**no** reintentable): llegaste a las 200 operaciones en modo demo de
+          hoy. El cupo se reinicia a medianoche (hora de Perú). En producción no existe este tope.
+      headers:
+        Retry-After:
+          description: Solo en `LIMITE_PETICIONES`. Segundos a esperar antes de reintentar.
+          schema: { type: integer }
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/Error'
+              - type: object
+                properties:
+                  retry_after: { type: integer, description: Solo en LIMITE_PETICIONES. }
+                  pruebas_restantes_hoy: { type: integer, description: Solo en LIMITE_PRUEBAS_DIARIO (siempre 0). }
+                  limite_pruebas_diario: { type: integer, description: Solo en LIMITE_PRUEBAS_DIARIO. }
+                  creditos_restantes: { type: integer, description: Solo en LIMITE_PRUEBAS_DIARIO. }
+          examples:
+            limitePeticiones:
+              summary: Límite de peticiones por minuto (reintentable)
+              value:
+                success: false
+                message: Demasiadas peticiones. Espera 40 segundos e intenta de nuevo.
+                retry_after: 40
+                codigo: LIMITE_PETICIONES
+                reintentable: true
+            limitePruebasDiario:
+              summary: Tope diario de pruebas en modo demo (NO reintentable)
+              value:
+                success: false
+                message: Llegaste al máximo de 200 pruebas por día en modo demo. Mañana se reinicia (medianoche, hora de Perú). Las pruebas no gastan créditos; en producción no hay este tope.
+                codigo: LIMITE_PRUEBAS_DIARIO
+                reintentable: false
+                creditos_restantes: 14945
+                pruebas_restantes_hoy: 0
+                limite_pruebas_diario: 200
+    ServerErrorOrRateLimit:
+      description: |
+        Error interno del servidor (`codigo: ERROR_INTERNO`, reintentable). Los errores técnicos (SQL, PHP)
+        se devuelven con un mensaje genérico, nunca con rutas de archivos ni líneas de código.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            success: false
+            message: Ocurrió un error interno. Intenta de nuevo en unos segundos.
+            codigo: ERROR_INTERNO
+            reintentable: true
+
+  schemas:
+    # ───────────── Errores ─────────────
+    CodigoError:
+      type: string
+      description: |
+        Código estable del error (ver la tabla "Errores" de la descripción general). La lista puede
+        crecer en el futuro: trata un código desconocido según `reintentable`.
+      examples: [NO_ENCONTRADO]
+      enum:
+        - NO_AUTENTICADO
+        - PLAN_VENCIDO
+        - SIN_CREDITOS
+        - RUC_NO_AUTORIZADO
+        - RUC_DESACTIVADO
+        - LLAVE_DE_PRUEBA_EN_PRODUCCION
+        - SIN_PERMISO
+        - NO_ENCONTRADO
+        - RUTA_NO_ENCONTRADA
+        - METODO_NO_PERMITIDO
+        - EMISION_EN_CURSO
+        - CONFLICTO
+        - DATOS_INVALIDOS
+        - RUC_REQUERIDO
+        - RUC_SIN_TENANT
+        - CERTIFICADO_NO_CONFIGURADO
+        - ERROR_EMISION
+        - RECHAZADO_SUNAT
+        - REENVIO_FALLIDO
+        - SUNAT_NO_DISPONIBLE
+        - LIMITE_PETICIONES
+        - LIMITE_PRUEBAS_DIARIO
+        - ANULACION_MIXTA
+        - ERROR_INTERNO
+    Error:
+      type: object
+      description: |
+        Forma de TODA respuesta de error del API. `success` y `message` se mantienen por compatibilidad;
+        decide tu lógica con `codigo` y `reintentable`. Algunos endpoints agregan campos propios.
+      required: [success, message, codigo, reintentable]
+      properties:
+        success: { type: boolean, const: false }
+        message: { type: string, description: 'Mensaje legible en español. Puede cambiar de redacción: no lo compares.' }
+        codigo: { $ref: '#/components/schemas/CodigoError' }
+        reintentable:
+          type: boolean
+          description: true si repetir la misma petición más tarde puede funcionar (429 LIMITE_PETICIONES, 409 EMISION_EN_CURSO, 5xx, SUNAT_NO_DISPONIBLE). `LIMITE_PRUEBAS_DIARIO` es 429 pero NO es reintentable.
+    NoCreditsError:
+      allOf:
+        - $ref: '#/components/schemas/Error'
+        - type: object
+          required: [creditos_restantes]
+          properties:
+            creditos_restantes: { type: integer, const: 0 }
+    ValidationError:
+      type: object
+      description: |
+        Error de validación por campo (`codigo: DATOS_INVALIDOS`). `campos` trae el mapa campo → mensajes.
+        Por compatibilidad, `message` puede ser ese mismo mapa (petición sin `Accept: application/json`),
+        y con `Accept: application/json` el mapa también aparece en la raíz del JSON.
+      required: [success, message, codigo, reintentable, campos]
+      properties:
+        success: { type: boolean, const: false }
+        message:
+          description: 'Texto, o (sin `Accept: application/json`) el mapa de errores.'
+          oneOf:
+            - type: string
+            - $ref: '#/components/schemas/ValidationErrorMap'
+        codigo: { type: string, const: DATOS_INVALIDOS }
+        reintentable: { type: boolean, const: false }
+        campos: { $ref: '#/components/schemas/ValidationErrorMap' }
+      additionalProperties:
+        description: 'Con `Accept: application/json`, el mapa de errores también va en la raíz (compatibilidad).'
+        type: array
+        items: { type: string }
+    ValidationErrorMap:
+      type: object
+      description: 'Mapa campo → lista de mensajes (Laravel). Ejemplo: `{"limite": ["El campo limite no debe ser mayor que 100."]}`.'
+      additionalProperties:
+        type: array
+        items: { type: string }
+
+    # ───────────── Catálogos ─────────────
+    EstadoCodigo:
+      type: string
+      description: 'Estado del comprobante: 01 Registrado, 03 Enviado, 05 Aceptado, 07 Observado, 09 Rechazado, 11 Anulado, 13 Por anular.'
+      enum: ["01", "03", "05", "07", "09", "11", "13"]
+    TipoDocumentoComprobante:
+      type: string
+      description: 01 Factura, 03 Boleta de venta, 07 Nota de crédito, 08 Nota de débito.
+      enum: ["01", "03", "07", "08"]
+    Moneda:
+      type: string
+      description: Código de moneda (catálogo del RUC; se crea con PEN y USD).
+      enum: [PEN, USD]
+    AfectacionIgv:
+      type: string
+      description: |
+        Catálogo 07 SUNAT. 10 Gravado onerosa; 11-16 Gravado retiro/bonificación (gratuitas);
+        17 IVAP; 20 Exonerado onerosa; 21 Exonerado gratuita; 30 Inafecto onerosa; 31-37 Inafecto
+        retiro/gratuita; 40 Exportación.
+      enum: ["10", "11", "12", "13", "14", "15", "16", "17", "20", "21", "30", "31", "32", "33", "34", "35", "36", "37", "40"]
+    TipoDocumentoIdentidad:
+      type: string
+      description: 'Catálogo 06 SUNAT: 0 Doc. trib. no domiciliado sin RUC, 1 DNI, 4 Carnet de extranjería, 6 RUC, 7 Pasaporte, A-E otros.'
+      enum: ["0", "1", "4", "6", "7", "A", "B", "C", "D", "E"]
+
+    # ───────────── Cobro (común a /documents, /guias, /anulaciones) ─────────────
+    CobroOperacion:
+      type: object
+      description: |
+        Campos de cobro de las operaciones que consumen crédito. `modo_demo` y `pruebas_restantes_hoy`
+        solo aparecen si la operación fue en un RUC en modo demo (sin costo).
+      required: [creditos_restantes, credito_cobrado]
+      properties:
+        creditos_restantes:
+          type: integer
+          description: Tu saldo real de créditos después de la operación (en demo no cambia).
+        credito_cobrado:
+          type: boolean
+          description: '`true` si esta operación descontó 1 crédito. En demo siempre `false`; en `/guias` también `false` si la guía no se pudo enviar (se devolvió).'
+        modo_demo:
+          type: boolean
+          const: true
+          description: Solo en RUCs demo.
+        pruebas_restantes_hoy:
+          type: integer
+          minimum: 0
+          description: Solo en RUCs demo. Operaciones demo que le quedan hoy a la cuenta (tope 200 por día, se reinicia a medianoche hora de Perú).
+
+    # ───────────── Feedback SUNAT (común) ─────────────
+    SunatFeedback:
+      type: object
+      description: Diagnóstico SUNAT que se agrega a las respuestas de comprobantes.
+      required: [aceptado_por_sunat, entorno, tiene_validez_fiscal]
+      properties:
+        sunat:
+          description: Código y mensaje de SUNAT guardados para el comprobante (solo si existen).
+          type: object
+          properties:
+            codigo: { type: [string, "null"] }
+            descripcion: { type: [string, "null"] }
+        aceptado_por_sunat:
+          type: boolean
+          description: true solo si `estado` es `05`.
+        entorno:
+          type: string
+          enum: [prueba, produccion]
+          description: Entorno en el que se emitió ESTE comprobante.
+        tiene_validez_fiscal:
+          type: boolean
+        accion_requerida:
+          type: string
+          description: Solo en estados `01` y `09`; qué hacer a continuación.
+
+    # ───────────── Utilidades / Cuenta ─────────────
+    PingResponse:
+      type: object
+      required: [success, message, cuenta, creditos, tipo_llave]
+      properties:
+        success: { type: boolean, const: true }
+        message: { type: string }
+        cuenta: { type: [string, "null"], description: 'Nombre de la cuenta API.' }
+        creditos: { type: integer, description: 'Créditos disponibles (cupo del plan + bolsa).' }
+        tipo_llave:
+          type: string
+          enum: [prueba, produccion]
+          description: 'Llave usada: `prueba` (empieza con `fs_test_`, solo escribe en RUCs en modo demo) o `produccion`.'
+        ruc_emisor: { type: [string, "null"], description: 'Solo si se resolvió un RUC.' }
+        razon_social: { type: [string, "null"], description: 'Solo si se resolvió un RUC. Es el nombre comercial (`trade_name`) de la empresa.' }
+    AccountResponse:
+      type: object
+      required: [success, cuenta, creditos_disponibles, creditos_recargados_total, creditos_consumidos, plan, rucs]
+      properties:
+        success: { type: boolean, const: true }
+        cuenta: { type: string }
+        creditos_disponibles: { type: integer, description: 'Lo que puede emitir ahora (cupo del plan restante este mes + bolsa).' }
+        creditos_recargados_total: { type: integer }
+        creditos_consumidos: { type: integer }
+        plan:
+          $ref: '#/components/schemas/PlanSummary'
+        rucs:
+          type: array
+          items:
+            type: object
+            properties:
+              ruc: { type: string }
+              nombre: { type: string }
+      example:
+        success: true
+        cuenta: Mi Integración
+        creditos_disponibles: 4830
+        creditos_recargados_total: 5000
+        creditos_consumidos: 170
+        plan:
+          plan: Pro
+          plan_activo: true
+          plan_vencido: false
+          periodo: mensual
+          plan_vence: "2026-10-31"
+          cupo_mensual: 1000
+          cupo_usado_mes: 120
+          cupo_restante_mes: 880
+          cupo_se_renueva: "2026-10-15"
+          bolsa: 3950
+          bolsa_vence: { fecha: "2027-07-08", cantidad: 3950 }
+          disponibles: 4830
+        rucs:
+          - { ruc: "20123456789", nombre: MI EMPRESA S.A.C. }
+    PlanSummary:
+      type: object
+      properties:
+        plan: { type: [string, "null"], description: 'Nombre del plan de suscripción, o null.' }
+        plan_activo: { type: boolean }
+        plan_vencido: { type: boolean, description: 'true si la cuenta tuvo plan y ya venció (no se renovó).' }
+        periodo: { type: [string, "null"], enum: [mensual, anual, null] }
+        plan_vence: { type: [string, "null"], format: date }
+        cupo_mensual: { type: integer }
+        cupo_usado_mes: { type: integer }
+        cupo_restante_mes: { type: integer }
+        cupo_se_renueva: { type: [string, "null"], format: date }
+        bolsa: { type: integer, description: 'Créditos de recargas sueltas.' }
+        bolsa_vence:
+          type: [object, "null"]
+          description: Próximo vencimiento de la bolsa.
+          properties:
+            fecha: { type: string, format: date }
+            cantidad: { type: integer }
+        disponibles: { type: integer }
+    SeriesResponse:
+      type: object
+      required: [success, series]
+      properties:
+        success: { type: boolean, const: true }
+        series:
+          type: array
+          items:
+            type: object
+            properties:
+              serie: { type: string, examples: [FA01] }
+              codigo_tipo_documento: { type: string, description: 'Tipo de comprobante de la serie (01, 03, 07, 08, 09, 31...).' }
+              siguiente_numero: { type: integer }
+
+    # ───────────── Emisión de comprobantes ─────────────
+    EmitDocumentRequest:
+      type: object
+      description: Comprobante (factura, boleta, nota de crédito o débito). Los campos desconocidos se ignoran.
+      required:
+        - fecha_de_emision
+        - hora_de_emision
+        - codigo_tipo_documento
+        - codigo_tipo_moneda
+        - datos_del_cliente_o_receptor
+        - totales
+        - items
+      additionalProperties: true
+      properties:
+        ruc:
+          type: string
+          pattern: '^\d{11}$'
+          description: RUC emisor. Obligatorio si la cuenta tiene varios RUCs.
+        codigo_establecimiento:
+          type: string
+          description: Código del local desde el que se emite (ej. `0001`). Por defecto, el establecimiento del admin (`0000`).
+        serie_documento:
+          type: string
+          description: Serie (ej. FA01, BA01, FN01). Opcional si el establecimiento tiene una sola serie para el tipo.
+        numero_documento:
+          type: string
+          default: "#"
+          description: '`#` para correlativo automático. Un número explícito ya usado da `422`.'
+        fecha_de_emision:
+          type: string
+          format: date
+          description: |
+            Fecha de emisión (YYYY-MM-DD) **en hora de Perú** (zona `America/Lima`, UTC-5, sin horario
+            de verano). Debe ser la fecha real de hoy en Perú. Ojo: un servidor en UTC que use su fecha
+            local después de las 19:00 de Perú mandaría la fecha de mañana. Es obligatoria: el API no
+            la completa si falta (la emisión se rechaza con `422` y no se cobra).
+        hora_de_emision:
+          type: string
+          pattern: '^\d{2}:\d{2}:\d{2}$'
+          description: Hora de emisión (HH:MM:SS, 24 h) en hora de Perú (`America/Lima`). Obligatoria; el API no la completa.
+        fecha_de_vencimiento:
+          type: string
+          format: date
+          description: Solo facturas/boletas. Si no se envía, se usa la fecha de emisión.
+        codigo_tipo_documento:
+          $ref: '#/components/schemas/TipoDocumentoComprobante'
+        codigo_tipo_operacion:
+          type: string
+          description: Catálogo 51 SUNAT (0101 venta interna, 0200 exportación, 1001 detracción, 1004 detracción transporte de carga...). Obligatorio en la práctica para 01/03; no aplica a notas.
+          examples: ["0101"]
+        codigo_tipo_moneda:
+          $ref: '#/components/schemas/Moneda'
+        factor_tipo_de_cambio:
+          type: number
+          default: 1
+          description: Tipo de cambio de venta.
+        numero_orden_de_compra:
+          type: string
+          description: Referencia de orden de compra (aparece en PDF y XML).
+        numero_de_placa:
+          type: string
+          description: Placa vehicular (ventas de combustible, etc.).
+        informacion_adicional:
+          type: string
+          description: Texto libre que aparece en el PDF y viaja en el XML como nota adicional.
+        codigo_condicion_de_pago:
+          type: string
+          enum: ["01", "02"]
+          default: "01"
+          description: '`01` Contado, `02` Crédito (requiere `cuotas`). Un texto como "Credito" se ignora y se emite al contado.'
+        cuotas:
+          type: array
+          description: Cuotas del crédito. La suma debe coincidir con `total_venta`.
+          items:
+            $ref: '#/components/schemas/Cuota'
+        pagos:
+          type: array
+          description: Pagos recibidos (solo 01/03).
+          items:
+            $ref: '#/components/schemas/Pago'
+        datos_del_cliente_o_receptor:
+          $ref: '#/components/schemas/Cliente'
+        totales:
+          $ref: '#/components/schemas/Totales'
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/ItemComprobante'
+        detraccion:
+          $ref: '#/components/schemas/Detraccion'
+        percepcion:
+          $ref: '#/components/schemas/ImpuestoAdicional'
+        retencion:
+          $ref: '#/components/schemas/ImpuestoAdicional'
+        cargos:
+          type: array
+          items:
+            $ref: '#/components/schemas/CargoDescuento'
+        descuentos:
+          type: array
+          items:
+            $ref: '#/components/schemas/CargoDescuento'
+        anticipos:
+          type: array
+          items:
+            $ref: '#/components/schemas/Anticipo'
+        guias:
+          type: array
+          description: Guías de remisión relacionadas.
+          items:
+            $ref: '#/components/schemas/DocumentoReferencia'
+        relacionados:
+          type: array
+          description: Otros documentos relacionados.
+          items:
+            allOf:
+              - $ref: '#/components/schemas/DocumentoReferencia'
+              - type: object
+                required: [monto]
+                properties:
+                  monto: { type: number }
+        leyendas:
+          type: array
+          items:
+            $ref: '#/components/schemas/Leyenda'
+        acciones:
+          $ref: '#/components/schemas/Acciones'
+        codigo_tipo_nota:
+          type: string
+          description: 'Obligatorio en 07/08. Crédito (cat. 09): 01 Anulación de la operación, 07 Devolución por ítem, etc.; débito (cat. 10): 01 Intereses por mora, 02 Aumento en el valor, 03 Penalidades.'
+          examples: ["01"]
+        motivo_o_sustento_de_nota:
+          type: string
+          description: Solo 07/08. Motivo de la nota (si se omite queda vacío).
+        documento_afectado:
+          description: Obligatorio en 07/08 (sin este bloque la emisión de la nota falla con 422).
+          allOf:
+            - $ref: '#/components/schemas/DocumentoAfectado'
+    Cliente:
+      type: object
+      required: [codigo_tipo_documento_identidad, numero_documento]
+      properties:
+        codigo_tipo_documento_identidad:
+          $ref: '#/components/schemas/TipoDocumentoIdentidad'
+        numero_documento: { type: string }
+        apellidos_y_nombres_o_razon_social:
+          type: string
+          description: Opcional con RUC (6) o DNI (1), se autocompleta en SUNAT/RENIEC; obligatorio con otros tipos.
+        nombre_comercial: { type: string }
+        codigo_pais: { type: string, default: PE }
+        ubigeo:
+          type: string
+          pattern: '^\d{6}$'
+          description: Ubigeo de 6 dígitos (se valida contra el catálogo cuando el cliente tiene RUC).
+        direccion: { type: string }
+        correo_electronico: { type: string, format: email }
+        telefono: { type: string }
+        codigo_tipo_direccion: { type: string }
+    Totales:
+      type: object
+      required: [total_venta]
+      description: Importes del comprobante. Si un total viene en 0 o vacío, el sistema lo recalcula desde los ítems.
+      properties:
+        total_operaciones_gravadas: { type: number }
+        total_operaciones_exoneradas: { type: number }
+        total_operaciones_inafectas: { type: number }
+        total_operaciones_gratuitas: { type: number }
+        total_exportacion: { type: number }
+        total_igv: { type: number }
+        total_igv_operaciones_gratuitas: { type: number }
+        total_base_isc: { type: number }
+        total_isc: { type: number }
+        total_base_otros_impuestos: { type: number }
+        total_otros_impuestos: { type: number }
+        total_impuestos_bolsa_plastica: { type: number }
+        total_impuestos: { type: number }
+        total_valor: { type: number }
+        total_anticipos: { type: number }
+        total_descuentos: { type: number }
+        total_cargos: { type: number }
+        subtotal_venta: { type: number, description: 'Si no se envía, se usa `total_venta`.' }
+        total_venta: { type: number, description: 'Importe total con impuestos.' }
+        total_pendiente_pago: { type: number }
+    ItemComprobante:
+      type: object
+      required: [descripcion, unidad_de_medida, cantidad]
+      properties:
+        codigo_interno:
+          type: string
+          description: Código/SKU de tu sistema. Se registra en el catálogo del RUC y se reusa. Sin él, todas las ventas usan un producto genérico compartido.
+        descripcion: { type: string, description: 'Descripción que se imprime en el PDF/XML.' }
+        nombre: { type: string }
+        nombre_secundario: { type: string }
+        codigo_tipo_item: { type: string, default: "01" }
+        codigo_producto_sunat: { type: string }
+        unidad_de_medida: { type: string, description: 'Catálogo 03: `NIU` para bienes/productos, `ZZ` para servicios (`KGM`, `LTR`... si vendes por peso o volumen). Lista completa: `GET /catalogos/03`.' }
+        cantidad: { type: number }
+        valor_unitario: { type: number, description: 'Precio unitario sin IGV.' }
+        codigo_tipo_precio: { type: string, description: '01 precio unitario, 02 valor referencial (gratuitas).' }
+        precio_unitario: { type: number, description: 'Precio unitario con IGV.' }
+        codigo_tipo_afectacion_igv:
+          $ref: '#/components/schemas/AfectacionIgv'
+        total_base_igv: { type: number }
+        porcentaje_igv: { type: number }
+        total_igv: { type: number }
+        codigo_tipo_sistema_isc: { type: string }
+        total_base_isc: { type: number }
+        porcentaje_isc: { type: number }
+        total_isc: { type: number }
+        total_base_otros_impuestos: { type: number }
+        porcentaje_otros_impuestos: { type: number }
+        total_otros_impuestos: { type: number }
+        total_impuestos_bolsa_plastica: { type: number }
+        total_impuestos: { type: number }
+        total_valor_item: { type: number, description: 'Valor de venta del ítem sin impuestos.' }
+        total_cargos: { type: number }
+        total_descuentos: { type: number }
+        total_item: { type: number, description: 'Total del ítem con impuestos.' }
+        informacion_adicional: { type: string }
+        actualizar_descripcion:
+          type: boolean
+          default: true
+          description: Si el `codigo_interno` ya existe, actualiza la descripción del producto en el catálogo.
+        nombre_producto_pdf: { type: string, description: 'Texto alternativo para el PDF (por defecto, `descripcion`).' }
+        nombre_producto_xml: { type: string, description: 'Texto alternativo para el XML (por defecto, `descripcion`).' }
+        datos_adicionales:
+          type: array
+          items:
+            type: object
+            required: [codigo, descripcion]
+            properties:
+              codigo: { type: string }
+              descripcion: { type: string }
+              valor: { type: string }
+              fecha_inicio: { type: string, format: date }
+              fecha_fin: { type: string, format: date }
+              duracion: { type: string }
+        descuentos:
+          type: array
+          items:
+            $ref: '#/components/schemas/CargoDescuento'
+        cargos:
+          type: array
+          items:
+            $ref: '#/components/schemas/CargoDescuento'
+    Detraccion:
+      type: object
+      required: [codigo_tipo_detraccion, porcentaje, monto, codigo_metodo_pago, cuenta_bancaria]
+      description: Datos de detracción. La leyenda 2006 se agrega automáticamente.
+      properties:
+        codigo_tipo_detraccion: { type: string, description: 'Código de bien/servicio (catálogo 54), ej. `022`.' }
+        porcentaje: { type: number }
+        monto: { type: number, description: 'Porcentaje aplicado sobre el total con IGV, a 2 decimales.' }
+        codigo_metodo_pago: { type: string, description: 'Catálogo 59, ej. `001` depósito en cuenta.' }
+        cuenta_bancaria: { type: string, description: 'Cuenta de detracciones del Banco de la Nación.' }
+        ubigeo_origen: { type: string, pattern: '^\d{6}$', description: 'Obligatorio con operación 1004.' }
+        ubigeo_destino: { type: string, pattern: '^\d{6}$', description: 'Obligatorio con operación 1004.' }
+        direccion_origen: { type: string }
+        direccion_destino: { type: string }
+        detalle_viaje: { type: string }
+        valor_referencial_carga_util: { type: number }
+        valor_referencial_servicio_transporte: { type: number }
+        valor_referencia_carga_efectiva: { type: number }
+    ImpuestoAdicional:
+      type: object
+      description: Percepción o retención.
+      required: [codigo, porcentaje, monto, base]
+      properties:
+        codigo: { type: string }
+        porcentaje: { type: number }
+        monto: { type: number }
+        base: { type: number }
+    CargoDescuento:
+      type: object
+      required: [codigo, descripcion, factor, monto, base]
+      properties:
+        codigo: { type: string, description: 'Catálogo 53 SUNAT.' }
+        descripcion: { type: string }
+        factor: { type: number }
+        monto: { type: number }
+        base: { type: number }
+    Anticipo:
+      type: object
+      required: [numero, codigo_tipo_documento, monto, total]
+      properties:
+        numero: { type: string }
+        codigo_tipo_documento: { type: string }
+        monto: { type: number }
+        total: { type: number }
+    DocumentoReferencia:
+      type: object
+      required: [numero, codigo_tipo_documento]
+      properties:
+        numero: { type: string }
+        codigo_tipo_documento: { type: string }
+    Leyenda:
+      type: object
+      required: [codigo, valor]
+      properties:
+        codigo: { type: string, description: 'Catálogo 52 SUNAT.' }
+        valor: { type: string }
+    Acciones:
+      type: object
+      properties:
+        enviar_email: { type: boolean, description: 'Enviar el comprobante por correo al cliente.' }
+        enviar_xml_firmado: { type: boolean }
+        formato_pdf: { type: string, description: 'Formato del PDF (ej. a4, ticket).' }
+    Cuota:
+      type: object
+      required: [fecha, codigo_tipo_moneda, monto]
+      properties:
+        fecha: { type: string, format: date, description: 'Fecha de vencimiento de la cuota.' }
+        codigo_tipo_moneda:
+          $ref: '#/components/schemas/Moneda'
+        monto: { type: number }
+        codigo_metodo_de_pago: { type: string }
+    Pago:
+      type: object
+      required: [codigo_metodo_pago]
+      properties:
+        codigo_metodo_pago: { type: string, description: 'Código de método de pago del RUC.' }
+        codigo_destino_pago: { type: string }
+        referencia: { type: string }
+        monto: { type: number, default: 0 }
+        pago_recibido: { type: number }
+    DocumentoAfectado:
+      type: object
+      description: |
+        Comprobante que corrige la nota. Con `external_id` se enlaza al comprobante emitido en FactuSmart
+        (si no existe → `422`). Sin `external_id`, se usan `serie_documento` + `numero_documento` +
+        `codigo_tipo_documento` como referencia.
+      properties:
+        external_id: { type: string, format: uuid }
+        serie_documento: { type: string }
+        numero_documento: { type: string }
+        codigo_tipo_documento: { type: string, enum: ["01", "03"] }
+
+    EmitDocumentResponse:
+      allOf:
+        - type: object
+          required: [success, estado, serie_numero, external_id]
+          properties:
+            success: { type: boolean, const: true }
+            estado:
+              $ref: '#/components/schemas/EstadoCodigo'
+            estado_descripcion: { type: [string, "null"] }
+            serie_numero: { type: string, examples: [FA01-1234] }
+            external_id: { type: string, format: uuid }
+            sunat:
+              description: |
+                `{codigo, descripcion}` si hay respuesta SUNAT guardada; si no, la respuesta cruda del
+                envío (`code`, `description`, `notes`...) o `[]` si no se envió.
+              type: [object, array]
+        - $ref: '#/components/schemas/CobroOperacion'
+        - $ref: '#/components/schemas/SunatFeedback'
+
+    DocumentListItem:
+      allOf:
+        - type: object
+          properties:
+            external_id: { type: string, format: uuid }
+            serie_numero: { type: string }
+            codigo_tipo_documento:
+              $ref: '#/components/schemas/TipoDocumentoComprobante'
+            estado:
+              $ref: '#/components/schemas/EstadoCodigo'
+            estado_descripcion: { type: [string, "null"] }
+            fecha_emision: { type: [string, "null"], format: date }
+            total: { type: number }
+        - $ref: '#/components/schemas/SunatFeedback'
+    DocumentListResponse:
+      type: object
+      required: [success, comprobantes, siguiente_cursor]
+      properties:
+        success: { type: boolean, const: true }
+        comprobantes:
+          type: array
+          items:
+            $ref: '#/components/schemas/DocumentListItem'
+        siguiente_cursor:
+          type: [integer, "null"]
+          description: Pásalo como `antes_de` para la siguiente página. `null` = no hay más.
+    DocumentDetailResponse:
+      allOf:
+        - type: object
+          required: [success, estado, serie_numero, external_id, links]
+          properties:
+            success: { type: boolean, const: true }
+            estado:
+              $ref: '#/components/schemas/EstadoCodigo'
+            estado_descripcion: { type: [string, "null"] }
+            serie_numero: { type: string }
+            external_id: { type: string, format: uuid }
+            fecha_emision: { type: [string, "null"], format: date }
+            total: { type: number }
+            links:
+              type: object
+              description: URLs absolutas de descarga (incluyen `?ruc=` si lo enviaste).
+              properties:
+                pdf: { type: string, format: uri }
+                xml: { type: string, format: uri }
+                cdr: { type: string, format: uri }
+        - $ref: '#/components/schemas/SunatFeedback'
+    ResendResponse:
+      allOf:
+        - type: object
+          required: [success, estado, serie_numero, external_id]
+          properties:
+            success: { type: boolean, description: 'Si el reintento se ejecutó sin error de sistema (no implica aceptación).' }
+            mensaje: { type: [string, "null"] }
+            estado:
+              $ref: '#/components/schemas/EstadoCodigo'
+            serie_numero: { type: string }
+            external_id: { type: string, format: uuid }
+        - $ref: '#/components/schemas/SunatFeedback'
+    QuerySunatResponse:
+      allOf:
+        - type: object
+          required: [success, estado, serie_numero, external_id]
+          properties:
+            success: { type: boolean, const: true }
+            estado:
+              $ref: '#/components/schemas/EstadoCodigo'
+            serie_numero: { type: string }
+            external_id: { type: string, format: uuid }
+            consulta:
+              type: [object, "null"]
+              description: Respuesta cruda de la consulta de CDR a SUNAT.
+        - $ref: '#/components/schemas/SunatFeedback'
+    HistoryResponse:
+      allOf:
+        - type: object
+          required: [success, external_id, serie_numero, estado, historial]
+          properties:
+            success: { type: boolean, const: true }
+            external_id: { type: string, format: uuid }
+            serie_numero: { type: string }
+            estado:
+              $ref: '#/components/schemas/EstadoCodigo'
+            historial:
+              type: array
+              items:
+                type: object
+                properties:
+                  fecha: { type: [string, "null"], description: 'YYYY-MM-DD HH:MM:SS' }
+                  evento:
+                    type: string
+                    enum: [creado, registrado, enviado, aceptado, observado, rechazado, anulado, por_anular, anulacion_enviada, error, reintento]
+                    description: '`anulacion_enviada` trae en `detalle` el tipo (`resumen`/`baja`), el `ticket` y el `identificador` (`RC-…`/`RA-…`).'
+                  mensaje: { type: [string, "null"] }
+                  codigo_sunat: { type: [string, "null"] }
+                  detalle: { type: [object, array, "null"] }
+        - $ref: '#/components/schemas/SunatFeedback'
+    RucOnlyBody:
+      type: object
+      properties:
+        ruc: { type: string, pattern: '^\d{11}$', description: 'RUC emisor (obligatorio si la cuenta tiene varios).' }
+
+    # ───────────── Anulaciones ─────────────
+    VoidRequest:
+      type: object
+      required: [fecha_de_emision_de_documentos, documentos]
+      properties:
+        ruc: { type: string, pattern: '^\d{11}$' }
+        fecha_de_emision_de_documentos:
+          type: string
+          pattern: '^\d{2}-\d{2}-\d{4}$'
+          description: Fecha de emisión de los comprobantes a anular, formato DD-MM-AAAA. Debe coincidir con la de cada uno.
+        documentos:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [external_id, motivo_anulacion]
+            properties:
+              external_id: { type: string, format: uuid }
+              motivo_anulacion: { type: string }
+    TipoAnulacion:
+      type: string
+      enum: [baja, resumen]
+      description: '`baja` = comunicación de baja (facturas y sus notas, RA-…); `resumen` = resumen diario de anulación (boletas y sus notas, RC-…).'
+    VoidResponse:
+      allOf:
+        - type: object
+          required: [success, message, tipo, ticket, external_id, identificador]
+          properties:
+            success: { type: boolean, const: true }
+            message: { type: string }
+            tipo: { $ref: '#/components/schemas/TipoAnulacion' }
+            ticket: { type: [string, "null"], description: 'Ticket de SUNAT para `GET /anulaciones/{ticket}/status`.' }
+            external_id: { type: string, description: 'Identificador de la anulación (comunicación de baja o resumen).' }
+            identificador: { type: [string, "null"], description: 'Número SUNAT de la anulación: `RA-AAAAMMDD-N` (baja) o `RC-AAAAMMDD-N` (resumen).', examples: [RC-20261014-1] }
+        - $ref: '#/components/schemas/CobroOperacion'
+    VoidStatusResponse:
+      type: object
+      required: [success, tipo, ticket, estado, external_id, documentos]
+      properties:
+        success: { type: boolean, const: true }
+        tipo: { $ref: '#/components/schemas/TipoAnulacion' }
+        ticket: { type: string }
+        estado:
+          description: 'Estado de la anulación: `05` aceptada por SUNAT, `09` rechazada, `03` enviada.'
+          allOf:
+            - $ref: '#/components/schemas/EstadoCodigo'
+        external_id: { type: string }
+        documentos:
+          type: array
+          description: Cada comprobante incluido en la anulación y su estado actual.
+          items:
+            type: object
+            properties:
+              external_id: { type: [string, "null"], format: uuid }
+              serie_numero: { type: [string, "null"], examples: [BA01-72] }
+              estado:
+                description: '`11` anulado (SUNAT aceptó), `13` todavía por anular; `01` si SUNAT rechazó un resumen de boletas.'
+                type: [string, "null"]
+        sunat:
+          type: [object, array, "null"]
+          description: Respuesta de SUNAT a la consulta del ticket (la guardada, si SUNAT ya respondió).
+
+    # ───────────── Guías ─────────────
+    DispatchGuideRequest:
+      type: object
+      required:
+        - serie_documento
+        - fecha_de_emision
+        - hora_de_emision
+        - codigo_tipo_documento
+        - datos_del_emisor
+        - items
+      additionalProperties: true
+      properties:
+        ruc: { type: string, pattern: '^\d{11}$' }
+        serie_documento: { type: string, description: 'Serie de guía (ej. TA01 remitente, VA01 transportista).' }
+        numero_documento: { type: string, default: "#" }
+        fecha_de_emision: { type: string, format: date }
+        hora_de_emision: { type: string, pattern: '^\d{2}:\d{2}:\d{2}$' }
+        codigo_tipo_documento:
+          type: string
+          enum: ["09", "31"]
+          description: 09 guía del remitente, 31 guía del transportista.
+        datos_del_emisor:
+          type: object
+          required: [codigo_del_domicilio_fiscal]
+          properties:
+            codigo_del_domicilio_fiscal: { type: string, description: 'Código del establecimiento emisor (`0000` el principal).' }
+        datos_del_cliente_o_receptor:
+          $ref: '#/components/schemas/Cliente'
+        observaciones: { type: string }
+        codigo_modo_transporte: { type: string, enum: ["01", "02"], description: '01 público (transportista), 02 privado.' }
+        codigo_motivo_traslado: { type: string, description: 'Catálogo 20 (01 venta, 02 compra, 04 traslado entre establecimientos...).' }
+        descripcion_motivo_traslado: { type: string }
+        fecha_de_traslado: { type: string, format: date }
+        indicador_de_transbordo: { type: boolean, default: false }
+        codigo_de_puerto: { type: string }
+        unidad_peso_total: { type: string, examples: [KGM] }
+        peso_total: { type: number }
+        numero_de_bultos: { type: integer }
+        numero_de_contenedor: { type: string }
+        es_traslado_m1l: { type: boolean, default: false, description: 'Vehículo M1 o L (sin conductor ni vehículo).' }
+        numero_de_placa_m1l: { type: string }
+        direccion_partida:
+          $ref: '#/components/schemas/DireccionGuia'
+        direccion_llegada:
+          $ref: '#/components/schemas/DireccionGuia'
+        transportista:
+          type: object
+          description: Transporte público (modo 01).
+          required: [codigo_tipo_documento_identidad, numero_documento, apellidos_y_nombres_o_razon_social, numero_mtc]
+          properties:
+            codigo_tipo_documento_identidad: { type: string }
+            numero_documento: { type: string }
+            apellidos_y_nombres_o_razon_social: { type: string }
+            numero_mtc: { type: string }
+        chofer:
+          $ref: '#/components/schemas/Chofer'
+        chofer_secundario:
+          type: array
+          maxItems: 2
+          items:
+            $ref: '#/components/schemas/Chofer'
+        vehiculo:
+          $ref: '#/components/schemas/Vehiculo'
+        vehiculo_secundario:
+          type: array
+          maxItems: 2
+          items:
+            $ref: '#/components/schemas/Vehiculo'
+        documento_afectado:
+          $ref: '#/components/schemas/DocumentoAfectado'
+        documento_relacionado:
+          type: array
+          items:
+            type: object
+            properties:
+              numero: { type: string }
+              empresa: { type: string }
+              ruc: { type: string }
+              documento:
+                type: object
+                properties:
+                  id: { type: string }
+                  descripcion: { type: string }
+        datos_remitente:
+          $ref: '#/components/schemas/ParteGuia'
+        datos_destinatario:
+          $ref: '#/components/schemas/ParteGuia'
+        pagador_flete:
+          type: object
+          properties:
+            indicador_pagador_flete: { type: string }
+            codigo_tipo_documento_identidad: { type: string }
+            descripcion_tipo_documento_identidad: { type: string }
+            numero: { type: string }
+            nombres: { type: string }
+        leyendas:
+          type: array
+          items:
+            $ref: '#/components/schemas/Leyenda'
+        acciones:
+          $ref: '#/components/schemas/Acciones'
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/ItemGuia'
+    DireccionGuia:
+      type: object
+      required: [ubigeo, direccion, codigo_del_domicilio_fiscal]
+      properties:
+        ubigeo: { type: string, pattern: '^\d{6}$' }
+        direccion: { type: string }
+        codigo_del_domicilio_fiscal: { type: string, description: 'Código de establecimiento SUNAT del punto (`-` si no aplica).' }
+    Chofer:
+      type: object
+      required: [codigo_tipo_documento_identidad, numero_documento]
+      properties:
+        codigo_tipo_documento_identidad: { type: string }
+        numero_documento: { type: string }
+        nombres: { type: string }
+        numero_licencia: { type: string }
+        telefono: { type: string }
+    Vehiculo:
+      type: object
+      properties:
+        numero_de_placa: { type: string }
+        modelo: { type: string }
+        marca: { type: string }
+        certificado_habilitacion_vehicular: { type: string }
+    ParteGuia:
+      type: object
+      required: [codigo_tipo_documento_identidad, descripcion_tipo_documento_identidad, numero_documento, apellidos_y_nombres_o_razon_social]
+      properties:
+        codigo_tipo_documento_identidad: { type: string }
+        descripcion_tipo_documento_identidad: { type: string }
+        numero_documento: { type: string }
+        apellidos_y_nombres_o_razon_social: { type: string }
+    ItemGuia:
+      type: object
+      required: [descripcion, unidad_de_medida, cantidad]
+      description: Ítem trasladado. No lleva precio.
+      properties:
+        codigo_interno: { type: string, description: 'Código del producto; se crea en el catálogo si no existe.' }
+        descripcion: { type: string }
+        nombre: { type: string }
+        codigo_tipo_item: { type: string, default: "01" }
+        codigo_producto_sunat: { type: string }
+        unidad_de_medida: { type: string }
+        cantidad: { type: number }
+        informacion_adicional: { type: string }
+        dato_adicional: { type: string }
+    DispatchResponse:
+      allOf:
+        - type: object
+          required: [success, serie_numero, external_id, enviado, mensaje]
+          properties:
+            success: { type: boolean, const: true }
+            serie_numero: { type: string, examples: [TA01-15] }
+            external_id: { type: string, format: uuid }
+            enviado: { type: boolean, description: 'true si SUNAT aceptó el envío (solo entonces se cobra el crédito, y solo en un RUC en producción).' }
+            mensaje: { type: string }
+            envio:
+              type: [object, "null"]
+              description: Respuesta cruda del envío a SUNAT (`success`, `message`, ticket...).
+        - $ref: '#/components/schemas/CobroOperacion'
+    DispatchStatusResponse:
+      type: object
+      required: [success, external_id, estado]
+      properties:
+        success: { type: boolean, const: true }
+        external_id: { type: string, format: uuid }
+        estado:
+          $ref: '#/components/schemas/EstadoCodigo'
+        sunat:
+          type: [object, "null"]
+          description: Respuesta cruda de la consulta del ticket GRE a SUNAT.
+
+    # ───────────── Herramientas (/calcular, /catalogos) ─────────────
+    CalculateRequest:
+      type: object
+      required: [items]
+      properties:
+        porcentaje_igv:
+          type: number
+          enum: [18, 10.5]
+          default: 18
+          description: |
+            IGV de los ítems gravados (afectación `10`). `10.5` = tasa reducida Ley 31556 (restaurantes
+            y hoteles MYPE), solo si tu RUC está acogido.
+        items:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/CalculateItem'
+    CalculateItem:
+      type: object
+      description: Envía `valor_unitario` (sin IGV) **o** `precio_unitario` (con IGV), no los dos.
+      required: [descripcion, cantidad, afectacion]
+      properties:
+        descripcion: { type: string, maxLength: 500 }
+        cantidad: { type: number, exclusiveMinimum: 0 }
+        valor_unitario: { type: number, minimum: 0, description: Precio unitario SIN IGV. }
+        precio_unitario: { type: number, minimum: 0, description: Precio unitario CON IGV. }
+        afectacion:
+          type: string
+          enum: ["10", "20", "30", "40"]
+          description: '`10` gravado, `20` exonerado, `30` inafecto, `40` exportación. Para otras afectaciones arma el ítem a mano.'
+        unidad_de_medida:
+          type: string
+          default: NIU
+          pattern: '^[A-Za-z0-9]{1,5}$'
+          description: Código SUNAT del catálogo 03. `NIU` para bienes/productos, `ZZ` para servicios (`KGM`, `LTR`… si vendes por peso o volumen). Lista completa en `GET /catalogos/03` (o `/catalogos/unidades`).
+        codigo_interno: { type: string, description: Se copia tal cual al resultado. }
+      oneOf:
+        - required: [valor_unitario]
+        - required: [precio_unitario]
+    CalculateResponse:
+      type: object
+      required: [success, items, totales]
+      properties:
+        success: { type: boolean, const: true }
+        items:
+          type: array
+          description: Ítems en el formato exacto de `POST /documents` (`items`).
+          items:
+            $ref: '#/components/schemas/ItemComprobante'
+        totales:
+          $ref: '#/components/schemas/Totales'
+    ToolValidationError:
+      allOf:
+        - $ref: '#/components/schemas/Error'
+        - type: object
+          required: [campos]
+          properties:
+            campos:
+              $ref: '#/components/schemas/ValidationErrorMap'
+    CatalogListResponse:
+      type: object
+      required: [success, catalogos]
+      properties:
+        success: { type: boolean, const: true }
+        catalogos:
+          type: array
+          items:
+            type: object
+            required: [nombre, catalogo_sunat, descripcion, url]
+            properties:
+              nombre: { type: string, examples: [unidades] }
+              catalogo_sunat: { type: string, examples: ["03"] }
+              descripcion: { type: string }
+              url: { type: string, examples: [/api/v1/issuer/catalogos/unidades] }
+        nota: { type: string }
+    CatalogResponse:
+      type: object
+      required: [success, catalogo, catalogo_sunat, descripcion, total, datos]
+      properties:
+        success: { type: boolean, const: true }
+        catalogo: { type: string, examples: [unidades] }
+        catalogo_sunat: { type: string, examples: ["03"] }
+        descripcion: { type: string }
+        total: { type: integer }
+        datos:
+          type: array
+          items:
+            $ref: '#/components/schemas/CatalogRow'
+    CatalogRow:
+      type: object
+      required: [codigo, descripcion, activo]
+      properties:
+        codigo: { type: string }
+        descripcion: { type: string }
+        activo: { type: boolean, description: Usa solo las filas activas. }
+        abreviatura: { type: [string, "null"], description: Solo en tipos-documento. }
+        simbolo: { type: [string, "null"], description: Solo en monedas y unidades. }
+        es_exportacion: { type: boolean, description: Solo en afectacion-igv y tipos-operacion. }
+        es_gratuito: { type: boolean, description: Solo en afectacion-igv. }
+        porcentaje: { type: [number, string, "null"], description: Solo en detracciones. }
+
+    # ───────────── RUCs ─────────────
+    RucListResponse:
+      type: object
+      required: [success, rucs]
+      properties:
+        success: { type: boolean, const: true }
+        rucs:
+          type: array
+          items:
+            type: object
+            properties:
+              ruc: { type: string }
+              nombre: { type: string }
+              correo: { type: [string, "null"] }
+              entorno:
+                type: [string, "null"]
+                enum: [demo, produccion, null]
+                description: '`demo` = modo prueba (equivale a `entorno: prueba` en los comprobantes). null si el RUC no tiene tenant.'
+              activo: { type: boolean }
+              creado: { type: [string, "null"], description: 'YYYY-MM-DD HH:MM' }
+      example:
+        success: true
+        rucs:
+          - { ruc: "20609999991", nombre: Mi Cliente SAC, correo: contacto@micliente.pe, entorno: demo, activo: true, creado: "2026-07-08 10:30" }
+    CreateRucRequest:
+      type: object
+      required: [ruc, empresa, correo, clave]
+      properties:
+        ruc: { type: string, pattern: '^\d{11}$', description: 'RUC nuevo (11 dígitos).' }
+        empresa: { type: string, maxLength: 255, description: 'Razón social.' }
+        correo: { type: string, format: email, description: 'Correo del usuario administrador del panel del RUC.' }
+        clave: { type: string, minLength: 6, description: 'Contraseña de acceso al panel del RUC.' }
+    CreateRucResponse:
+      type: object
+      required: [success, ya_existia, ruc, nombre, activo, tenant_url]
+      properties:
+        success: { type: boolean, const: true }
+        ya_existia: { type: boolean }
+        ruc: { type: string }
+        nombre: { type: string }
+        activo: { type: boolean }
+        tenant_url: { type: [string, "null"], format: uri, description: 'URL del panel del RUC.' }
+        mensaje: { type: string, description: 'Solo cuando se crea (201).' }
+      example:
+        success: true
+        ya_existia: false
+        ruc: "20609999991"
+        nombre: Mi Cliente SAC
+        activo: true
+        tenant_url: https://20609999991.s2.factusmart.pe
+        mensaje: RUC creado en modo DEMO. Sigue la guía "Pasar a producción" para emitir documentos reales ante SUNAT.
+    RucActivationRequest:
+      type: object
+      required: [activo]
+      properties:
+        activo: { type: boolean, description: 'false desactiva, true reactiva.' }
+    RucActivationResponse:
+      type: object
+      required: [success, ruc, activo, mensaje]
+      properties:
+        success: { type: boolean, const: true }
+        ruc: { type: string }
+        activo: { type: boolean }
+        mensaje: { type: string }
+
+    # ───────────── Webhooks ─────────────
+    WebhookEvento:
+      type: string
+      description: |
+        `comprobante.aceptado` (05), `comprobante.observado` (07), `comprobante.rechazado` (09),
+        `comprobante.anulado` (11) o `prueba` (enviado con el botón "Enviar prueba" del portal).
+      enum: [comprobante.aceptado, comprobante.observado, comprobante.rechazado, comprobante.anulado, prueba]
+    WebhookComprobante:
+      type: object
+      description: Cuerpo del aviso. Se firma tal cual se envía (verifica la firma sobre los bytes crudos).
+      required: [id, evento, ruc, external_id, serie_numero, tipo_documento, estado, estado_descripcion, aceptado_por_sunat, entorno, sunat, fecha]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Identificador único del aviso. Es el mismo en todos los reintentos; úsalo para no procesar dos veces el mismo aviso.
+        evento: { $ref: '#/components/schemas/WebhookEvento' }
+        ruc: { type: string, description: RUC emisor del comprobante. }
+        external_id: { type: string, description: 'El mismo `external_id` que devolvió `POST /documents`.' }
+        serie_numero: { type: string, description: 'Serie y número, ej. `F001-123`.' }
+        tipo_documento:
+          type: string
+          enum: ['01', '03', '07', '08']
+          description: '`01` factura, `03` boleta, `07` nota de crédito, `08` nota de débito.'
+        estado:
+          type: string
+          enum: ['05', '07', '09', '11']
+          description: Estado actual del comprobante.
+        estado_descripcion: { type: [string, 'null'], description: 'Descripción del estado, ej. `Aceptado`.' }
+        aceptado_por_sunat: { type: boolean, description: '`true` solo si `estado` es `05`.' }
+        entorno:
+          type: string
+          enum: [prueba, produccion]
+          description: '`prueba` (beta SUNAT, sin validez fiscal) o `produccion`.'
+        sunat:
+          type: object
+          description: Lo que respondió SUNAT. Ambos campos pueden ser `null`.
+          required: [codigo, descripcion]
+          properties:
+            codigo: { type: [string, 'null'] }
+            descripcion: { type: [string, 'null'] }
+        fecha:
+          type: string
+          format: date-time
+          description: Momento del cambio de estado (ISO 8601, hora de Lima). No cambia entre reintentos (el último llega ~8,5 h después), así que no descartes avisos por antigüedad; deduplica por `id`.

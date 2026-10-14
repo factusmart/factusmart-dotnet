@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>netstandard2.0;net8.0</TargetFrameworks>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <RootNamespace>FactuSmart</RootNamespace>
+    <AssemblyName>FactuSmart</AssemblyName>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+
+    <PackageId>FactuSmart</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>FactuSmart</Authors>
+    <Company>FactuSmart</Company>
+    <Product>FactuSmart SDK</Product>
+    <Description>SDK oficial del API de facturación electrónica de FactuSmart (SUNAT, Perú): facturas, boletas, notas, guías de remisión (GRE 2.0), anulaciones, cálculo de IGV, catálogos SUNAT y descarga de PDF/XML/CDR.</Description>
+    <PackageTags>sunat;facturacion-electronica;peru;factusmart;cpe;ubl;igv;gre</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://factusmart.pe/api-facturacion-electronica/docs</PackageProjectUrl>
+    <PackageReleaseNotes>Ver CHANGELOG.md</PackageReleaseNotes>
+    <Copyright>Copyright (c) 2026 FactuSmart</Copyright>
+  </PropertyGroup>
+
+  <!-- netstandard2.0 no trae System.Text.Json: paquete de Microsoft (única dependencia, solo en ese target). -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <InternalsVisibleTo Include="FactuSmart.Tests" />
+  </ItemGroup>
+
+</Project>
