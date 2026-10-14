@@ -53,6 +53,8 @@ namespace FactuSmart
         public RecursoRucs Rucs { get; }
         /// <summary>/catalogos.</summary>
         public RecursoCatalogos Catalogos { get; }
+        /// <summary>/establecimientos (anexos).</summary>
+        public RecursoEstablecimientos Establecimientos { get; }
 
         public FactuSmartClient(FactuSmartOptions opciones)
         {
@@ -94,6 +96,7 @@ namespace FactuSmart
             Guias = new RecursoGuias(this);
             Rucs = new RecursoRucs(this);
             Catalogos = new RecursoCatalogos(this);
+            Establecimientos = new RecursoEstablecimientos(this);
         }
 
         public void Dispose()

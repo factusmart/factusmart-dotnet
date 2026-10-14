@@ -38,6 +38,8 @@ namespace FactuSmart.Tests
             ["calculateDocument"] = "Comprobantes.CalcularAsync",
             ["listCatalogs"] = "Catalogos.ListarAsync",
             ["getCatalog"] = "Catalogos.ConsultarAsync",
+            ["listEstablishments"] = "Establecimientos.ListarAsync",
+            ["createEstablishment"] = "Establecimientos.CrearAsync",
             // Webhook (sección `webhooks` del yaml): lo manda el API; el SDK solo verifica la firma.
             ["webhookComprobanteEstado"] = "FactuSmartClient.VerificarFirmaWebhook",
         };
@@ -64,7 +66,7 @@ namespace FactuSmart.Tests
 
             var sobran = Metodos.Keys.Where(k => !ids.Contains(k)).ToList();
             Assert.True(sobran.Count == 0, "métodos del SDK cuyo operationId ya no está en el yaml: " + string.Join(", ", sobran));
-            Assert.Equal(21, ids.Count);
+            Assert.Equal(23, ids.Count);
         }
 
         private static bool Existe(string ruta)

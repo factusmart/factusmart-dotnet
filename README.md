@@ -93,7 +93,7 @@ Todos devuelven `Task<JsonElement>` (salvo `DescargarAsync`) y aceptan un `Cance
 | `fs.Comprobantes.EmitirAsync(datos, opciones?)` | `POST /documents` | objeto |
 | `fs.Comprobantes.ListarAsync(filtros?, opciones?)` | `GET /documents` | objeto (`comprobantes`, `siguiente_cursor`) |
 | `fs.Comprobantes.ConsultarAsync(externalId, opciones?)` | `GET /documents/{id}` | objeto |
-| `fs.Comprobantes.DescargarAsync(externalId, "pdf" \| "xml" \| "cdr", opciones?)` | `GET /documents/{id}/{tipo}` | **`byte[]`** |
+| `fs.Comprobantes.DescargarAsync(externalId, "pdf" \| "xml" \| "cdr", opciones?, formato: "ticket"?)` | `GET /documents/{id}/{tipo}?formato=` | **`byte[]`** |
 | `fs.Comprobantes.ReenviarAsync(externalId, opciones?)` | `POST /documents/{id}/reenviar` | objeto |
 | `fs.Comprobantes.ConsultarSunatAsync(externalId, opciones?)` | `POST /documents/{id}/consultar-sunat` | objeto |
 | `fs.Comprobantes.HistorialAsync(externalId, opciones?)` | `GET /documents/{id}/historial` | objeto |
@@ -102,6 +102,9 @@ Todos devuelven `Task<JsonElement>` (salvo `DescargarAsync`) y aceptan un `Cance
 | `fs.Anulaciones.EstadoAsync(ticket, opciones?)` | `GET /anulaciones/{ticket}/status` | objeto (`tipo`, `estado`, `documentos`) |
 | `fs.Catalogos.ListarAsync(opciones?)` | `GET /catalogos` | objeto (`catalogos`, `nota`) |
 | `fs.Catalogos.ConsultarAsync(nombre, new OpcionesCatalogo { Q, Ruc }?)` | `GET /catalogos/{nombre}` | objeto (`catalogo`, `total`, `datos`) |
+| `fs.Catalogos.BuscarProductoSunatAsync(q, limite: 10?, opciones?)` | `GET /catalogos/productos-sunat` | objeto (`total`, `hay_mas`, `datos`) |
+| `fs.Establecimientos.ListarAsync(opciones?)` | `GET /establecimientos` | objeto (`establecimientos`) |
+| `fs.Establecimientos.CrearAsync(datos, opciones?)` | `POST /establecimientos` | objeto (`message`, `establecimiento`) |
 | `fs.Guias.EmitirAsync(datos, opciones?)` | `POST /guias` | objeto (revisa `enviado`) |
 | `fs.Guias.EstadoAsync(externalId, opciones?)` | `GET /guias/{id}/status` | objeto |
 | `fs.Rucs.ListarAsync()` | `GET /rucs` | objeto |
@@ -124,6 +127,17 @@ File.WriteAllBytes("comprobante.pdf", await fs.Comprobantes.DescargarAsync(exter
 ```
 
 El CDR solo existe cuando SUNAT respondió; si no existe, se lanza `NoEncontrado`.
+
+**PDF en ticket u otro tamaño** (solo PDF): `a4`, `a5`, `ticket` (= `ticket80`, 80 mm), `ticket80`,
+`ticket58`, `ticket50`. Sin `formato` sale el A4 de siempre.
+
+```csharp
+var ticket = await fs.Comprobantes.DescargarAsync(externalId, "pdf", formato: "ticket");   // 80 mm
+var t58 = await fs.Comprobantes.DescargarAsync(externalId, "pdf", formato: "ticket58");    // 58 mm
+```
+
+Un `formato` con `"xml"`/`"cdr"` o fuera de la lista lanza `ErrorDeValidacion` (422, `Codigo`
+`DATOS_INVALIDOS`, `Campos["formato"]`) **sin hacer la petición**. No cambia el PDF que recibe tu cliente.
 
 ### Anular facturas y boletas
 
@@ -158,6 +172,30 @@ var activas = u.GetProperty("datos").EnumerateArray().Where(f => f.GetProperty("
 
 Usa solo las filas activas: el RUC valida contra ellas. Un nombre que no existe lanza `NoEncontrado`
 (la lista válida viene en `e.Respuesta`, propiedad `catalogos_disponibles`).
+
+**Código de producto SUNAT** (catálogo 25), por texto (sin tildes) o por código exacto/prefijo:
+
+```csharp
+var r = await fs.Catalogos.BuscarProductoSunatAsync("computador", limite: 10); // máx. 50
+foreach (var f in r.GetProperty("datos").EnumerateArray())
+    Console.WriteLine($"{f.GetProperty("codigo")} {f.GetProperty("descripcion")}"); // 43211503 ...
+// r.GetProperty("hay_mas") == true → afina la búsqueda
+```
+
+### Anexos (establecimientos)
+
+```csharp
+var l = await fs.Establecimientos.ListarAsync(); // codigo_anexo, nombre, series, predeterminado
+var nuevo = await fs.Establecimientos.CrearAsync(new {
+    codigo_anexo = "0001", nombre = "Tienda Miraflores", direccion = "Av. Larco 345", ubigeo = "150122",
+    series = new[] { new { codigo_tipo_documento = "03", serie = "B002" } }, // opcional
+});
+```
+
+- Registra antes el anexo en SUNAT (Clave SOL): el API no lo da de alta allí.
+- `CrearAsync` **nunca se reintenta** (no es idempotente). Si el plan no permite más locales lanza
+  `RucNoAutorizado` con `Codigo` `LIMITE_ESTABLECIMIENTOS`. No consumen crédito.
+- Editar o eliminar un local se hace desde el sistema web.
 
 ## ¿Calcular en el servidor o local?
 
@@ -317,7 +355,8 @@ constante y nunca lanza: si la firma o el secreto faltan o están mal formados, 
 
 ```bash
 dotnet build
-dotnet test --filter "Categoria!=Integracion"   # sin red (handler falso) + contrato, en net8.0 y net48
+dotnet test --filter "Categoria!=Integracion&Categoria!=IntegracionLectura"   # sin red (handler falso) + contrato, en net8.0 y net48
+dotnet test -f net8.0 --filter "Categoria=IntegracionLectura"                 # API local, solo lectura (no emite ni crea nada)
 dotnet test                                     # todo, incluido el API local https://factusmart.test (máx. 3 emisiones demo)
 dotnet pack src/FactuSmart -c Release -o artifacts
 ```

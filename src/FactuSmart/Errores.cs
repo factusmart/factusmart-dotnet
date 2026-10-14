@@ -19,7 +19,7 @@ namespace FactuSmart
             "METODO_NO_PERMITIDO", "EMISION_EN_CURSO", "CONFLICTO", "DATOS_INVALIDOS", "RUC_REQUERIDO",
             "RUC_SIN_TENANT", "CERTIFICADO_NO_CONFIGURADO", "ERROR_EMISION", "RECHAZADO_SUNAT",
             "REENVIO_FALLIDO", "SUNAT_NO_DISPONIBLE", "LIMITE_PETICIONES", "LIMITE_PRUEBAS_DIARIO",
-            "ANULACION_MIXTA", "ERROR_INTERNO",
+            "ANULACION_MIXTA", "ERROR_INTERNO", "PDF_NO_GENERADO", "LIMITE_ESTABLECIMIENTOS", "CATALOGO_NO_DISPONIBLE",
         };
 
         private static readonly IReadOnlyDictionary<string, string[]> SinCampos = new Dictionary<string, string[]>();

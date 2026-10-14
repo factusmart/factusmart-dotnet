@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
@@ -80,13 +81,44 @@ namespace FactuSmart
         public async Task<JsonElement> ConsultarAsync(string externalId, OpcionesRuc? opciones = null, CancellationToken cancellationToken = default)
             => await _c.JsonAsync(new FactuSmartClient.Peticion("GET", $"/documents/{FactuSmartClient.Id(externalId)}") { Query = { ["ruc"] = _c.RucDe(opciones) }, Reintentable = true }, cancellationToken).ConfigureAwait(false);
 
-        /// <summary>GET /documents/{external_id}/{pdf|xml|cdr} — devuelve los bytes del archivo.</summary>
-        public async Task<byte[]> DescargarAsync(string externalId, string tipo, OpcionesRuc? opciones = null, CancellationToken cancellationToken = default)
+        /// <summary>Valores de <c>formato</c> que acepta el PDF (<c>ticket</c> = <c>ticket80</c>, 80 mm).</summary>
+        public static readonly IReadOnlyList<string> FormatosPdf = new[] { "a4", "a5", "ticket", "ticket80", "ticket58", "ticket50" };
+
+        /// <summary>
+        /// GET /documents/{external_id}/{pdf|xml|cdr} — devuelve los bytes del archivo.
+        /// <paramref name="formato"/> (solo PDF): <c>a4</c>, <c>a5</c>, <c>ticket</c> (80 mm), <c>ticket80</c>,
+        /// <c>ticket58</c>, <c>ticket50</c>. Sin formato → el A4 de siempre (no se manda el parámetro).
+        /// Formato con xml/cdr o fuera de la lista → <see cref="ErrorDeValidacion"/> local, sin petición.
+        /// </summary>
+        public async Task<byte[]> DescargarAsync(string externalId, string tipo, OpcionesRuc? opciones = null, CancellationToken cancellationToken = default, string? formato = null)
         {
             if (tipo != "pdf" && tipo != "xml" && tipo != "cdr")
                 throw new FactuSmartException($"Tipo de archivo inválido \"{tipo}\": usa \"pdf\", \"xml\" o \"cdr\".");
+            if (formato != null)
+            {
+                if (tipo != "pdf")
+                    throw ErrorFormato($"\"formato\" solo aplica al PDF (pediste \"{tipo}\").");
+                if (!FormatosPdf.Contains(formato))
+                    throw ErrorFormato($"Formato de PDF inválido \"{formato}\": usa {string.Join(", ", FormatosPdf)}.");
+            }
             var p = new FactuSmartClient.Peticion("GET", $"/documents/{FactuSmartClient.Id(externalId)}/{tipo}") { Query = { ["ruc"] = _c.RucDe(opciones) }, Reintentable = true };
+            if (formato != null) p.Query["formato"] = formato;
             return await _c.BytesAsync(p, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>ErrorDeValidacion local (status 422, DATOS_INVALIDOS, Campos["formato"]), igual que el del API.</summary>
+        private static ErrorDeValidacion ErrorFormato(string mensaje)
+        {
+            var cuerpo = new JsonObject
+            {
+                ["success"] = false,
+                ["message"] = mensaje,
+                ["codigo"] = "DATOS_INVALIDOS",
+                ["reintentable"] = false,
+                ["campos"] = new JsonObject { ["formato"] = new JsonArray(JsonValue.Create(mensaje)) },
+            };
+            using (var d = JsonDocument.Parse(cuerpo.ToJsonString()))
+                return new ErrorDeValidacion(mensaje, 422, d.RootElement.Clone());
         }
 
         /// <summary>POST /documents/{external_id}/reenviar — no se reintenta automáticamente.</summary>
@@ -204,6 +236,46 @@ namespace FactuSmart
             p.Query["q"] = opciones?.Q;
             p.Query["ruc"] = _c.RucDe(opciones);
             return await _c.JsonAsync(p, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// GET /catalogos/productos-sunat — busca el código de producto SUNAT (catálogo 25) por código exacto o
+        /// prefijo, o por texto (sin tildes). <paramref name="limite"/> máx. 50. Respuesta: <c>total</c>,
+        /// <c>hay_mas</c> y <c>datos</c> (<c>codigo</c>, <c>descripcion</c>…). Se reintenta como un GET.
+        /// </summary>
+        public async Task<JsonElement> BuscarProductoSunatAsync(string q, int? limite = null, OpcionesRuc? opciones = null, CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrWhiteSpace(q))
+                throw new FactuSmartException("Catalogos.BuscarProductoSunatAsync(q): pasa un texto (ej. \"computador\") o un código (ej. \"4321\").");
+            var p = new FactuSmartClient.Peticion("GET", "/catalogos/productos-sunat") { Reintentable = true };
+            p.Query["q"] = q.Trim();
+            p.Query["limite"] = limite?.ToString(CultureInfo.InvariantCulture);
+            p.Query["ruc"] = _c.RucDe(opciones);
+            return await _c.JsonAsync(p, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary><c>cliente.Establecimientos</c>: locales (anexos) del RUC. No consumen crédito.</summary>
+    public sealed class RecursoEstablecimientos
+    {
+        private readonly FactuSmartClient _c;
+        internal RecursoEstablecimientos(FactuSmartClient c) { _c = c; }
+
+        /// <summary>GET /establecimientos — <c>establecimientos</c> con su <c>codigo_anexo</c>, series y <c>predeterminado</c>.</summary>
+        public Task<JsonElement> ListarAsync(OpcionesRuc? opciones = null, CancellationToken cancellationToken = default)
+            => _c.JsonAsync(new FactuSmartClient.Peticion("GET", "/establecimientos") { Query = { ["ruc"] = _c.RucDe(opciones) }, Reintentable = true }, cancellationToken);
+
+        /// <summary>
+        /// POST /establecimientos — <c>codigo_anexo</c>, <c>nombre</c>, <c>direccion</c>, <c>ubigeo</c> y opcionales
+        /// <c>telefono</c>, <c>email</c>, <c>crear_series_por_defecto</c>, <c>series</c>. No es idempotente: nunca se
+        /// reintenta. Límite del plan → <see cref="RucNoAutorizado"/> con <c>Codigo</c> <c>LIMITE_ESTABLECIMIENTOS</c>.
+        /// </summary>
+        public async Task<JsonElement> CrearAsync(object datos, OpcionesRuc? opciones = null, CancellationToken cancellationToken = default)
+        {
+            const string ayuda = "Establecimientos.CrearAsync(datos): pasa { codigo_anexo, nombre, direccion, ubigeo }.";
+            if (datos == null) throw new FactuSmartException(ayuda);
+            var cuerpo = _c.CuerpoConRuc(datos, opciones, ayuda);
+            return await _c.JsonAsync(new FactuSmartClient.Peticion("POST", "/establecimientos") { Cuerpo = cuerpo, Reintentable = false }, cancellationToken).ConfigureAwait(false);
         }
     }
 }

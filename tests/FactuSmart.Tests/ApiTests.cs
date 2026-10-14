@@ -234,3 +234,55 @@ namespace FactuSmart.Tests
         private static string Prop(JsonElement e, string p) => e.TryGetProperty(p, out var v) ? v.GetRawText() : "(no viene)";
     }
 }
+
+namespace FactuSmart.Tests
+{
+    /// <summary>
+    /// Pruebas contra el API local que NO emiten ni crean nada (solo lectura): anexos, PDF en ticket de un
+    /// comprobante ya existente y código de producto SUNAT. Se corren aparte con
+    /// <c>--filter Categoria=IntegracionLectura</c>. <c>Establecimientos.CrearAsync</c> solo se prueba sin red.
+    /// </summary>
+    [Trait("Categoria", "IntegracionLectura")]
+    public class ApiLecturaTests : IClassFixture<ApiLocal>
+    {
+        private readonly ApiLocal _api;
+        private readonly ITestOutputHelper _salida;
+        private FactuSmartClient Fs => _api.Cliente;
+
+        public ApiLecturaTests(ApiLocal api, ITestOutputHelper salida) { _api = api; _salida = salida; }
+
+        [Fact]
+        public async Task P10_establecimientos_listar_trae_establecimientos()
+        {
+            var r = await Fs.Establecimientos.ListarAsync();
+            Assert.True(r.GetProperty("success").GetBoolean());
+            var lista = r.GetProperty("establecimientos");
+            Assert.Equal(JsonValueKind.Array, lista.ValueKind);
+            Assert.True(lista.GetArrayLength() > 0, "el RUC local no tiene locales");
+            Assert.False(string.IsNullOrEmpty(lista[0].Str("codigo_anexo")));
+            _salida.WriteLine($"{lista.GetArrayLength()} local(es); primero {lista[0].Str("codigo_anexo")} {lista[0].Str("nombre")}");
+        }
+
+        [Fact]
+        public async Task P11_descargar_pdf_ticket58_de_un_comprobante_existente()
+        {
+            var l = await Fs.Comprobantes.ListarAsync(new { limite = 1 });
+            var comprobantes = l.GetProperty("comprobantes");
+            Assert.True(comprobantes.GetArrayLength() > 0, "el RUC local no tiene comprobantes para descargar");
+            var id = comprobantes[0].Str("external_id");
+            var pdf = await Fs.Comprobantes.DescargarAsync(id, "pdf", formato: "ticket58");
+            Assert.Equal("%PDF", Encoding.ASCII.GetString(pdf, 0, 4));
+            _salida.WriteLine($"PDF ticket58 de {comprobantes[0].Str("serie_numero")}: {pdf.Length} bytes");
+        }
+
+        [Fact]
+        public async Task P12_buscar_producto_sunat_computador_trae_43211503()
+        {
+            var r = await Fs.Catalogos.BuscarProductoSunatAsync("computador");
+            Assert.True(r.GetProperty("success").GetBoolean());
+            Assert.Contains(r.GetProperty("datos").EnumerateArray(), x => x.Str("codigo") == "43211503");
+            var c = await Fs.Catalogos.BuscarProductoSunatAsync("computador", limite: 1);
+            Assert.True(c.GetProperty("datos").GetArrayLength() <= 1);
+        }
+    }
+}

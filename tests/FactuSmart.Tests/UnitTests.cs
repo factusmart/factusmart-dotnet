@@ -443,5 +443,176 @@ namespace FactuSmart.Tests
             Assert.Equal(4, b.GetProperty("items").GetArrayLength());
             Assert.Equal(154.47m, b.GetProperty("totales").GetProperty("total_venta").GetDecimal());
         }
+
+        // ───── Establecimientos (anexos) ─────
+
+        [Fact]
+        public async Task Establecimientos_listar_GET_con_ruc_en_query_y_ruc_por_llamada()
+        {
+            var (c, m, _) = Cliente(R(200, new { success = true, establecimientos = new object[0] }));
+            var r = await c.Establecimientos.ListarAsync();
+            Assert.Equal(JsonValueKind.Array, r.GetProperty("establecimientos").ValueKind);
+            await c.Establecimientos.ListarAsync(new OpcionesRuc { Ruc = "20999999999" });
+            Assert.Equal("GET", m.Llamadas[0].Metodo);
+            Assert.Equal(Base + "/establecimientos?ruc=20123456789", m.Llamadas[0].Url.ToString());
+            Assert.Null(m.Llamadas[0].Cuerpo);
+            Assert.Equal(Base + "/establecimientos?ruc=20999999999", m.Llamadas[1].Url.ToString());
+        }
+
+        [Fact]
+        public async Task Establecimientos_listar_se_reintenta_como_GET()
+        {
+            var (c, m, _) = Cliente(R(503), R(200, new { success = true, establecimientos = new object[0] }));
+            await c.Establecimientos.ListarAsync();
+            Assert.Equal(2, m.Llamadas.Count);
+        }
+
+        [Fact]
+        public async Task Establecimientos_crear_POST_con_datos_y_ruc_en_el_cuerpo()
+        {
+            var (c, m, _) = Cliente(R(201, new { success = true, message = "ok", establecimiento = new { codigo_anexo = "0001" } }));
+            var r = await c.Establecimientos.CrearAsync(new
+            {
+                codigo_anexo = "0001", nombre = "Tienda Miraflores", direccion = "Av. Larco 345", ubigeo = "150122",
+                series = new[] { new { codigo_tipo_documento = "03", serie = "B002" } },
+            });
+            Assert.Equal("0001", r.GetProperty("establecimiento").Str("codigo_anexo"));
+            var l = m.Llamadas.Single();
+            Assert.Equal("POST", l.Metodo);
+            Assert.Equal(Base + "/establecimientos", l.Url.ToString());
+            Assert.Equal("", l.Url.Query);
+            var b = l.Cuerpo!.Value;
+            Assert.Equal("20123456789", b.Str("ruc"));
+            Assert.Equal("0001", b.Str("codigo_anexo"));
+            Assert.Equal("Tienda Miraflores", b.Str("nombre"));
+            Assert.Equal("150122", b.Str("ubigeo"));
+            Assert.Equal("B002", b.GetProperty("series")[0].Str("serie"));
+            Assert.False(l.Cabeceras.ContainsKey("Idempotency-Key"));
+        }
+
+        [Fact]
+        public async Task Establecimientos_crear_respeta_el_ruc_de_datos_y_el_de_opciones()
+        {
+            var (c, m, _) = Cliente(R(201));
+            await c.Establecimientos.CrearAsync(new { ruc = "20111111111", codigo_anexo = "0002" });
+            await c.Establecimientos.CrearAsync(new { codigo_anexo = "0003" }, new OpcionesRuc { Ruc = "20222222222" });
+            Assert.Equal("20111111111", m.Llamadas[0].Cuerpo!.Value.Str("ruc"));
+            Assert.Equal("20222222222", m.Llamadas[1].Cuerpo!.Value.Str("ruc"));
+            await Assert.ThrowsAsync<FactuSmartException>(() => c.Establecimientos.CrearAsync(null!));
+            Assert.Equal(2, m.Llamadas.Count);
+        }
+
+        [Fact]
+        public async Task Establecimientos_crear_hace_UNA_sola_peticion_ante_503()
+        {
+            var (c, m, esperas) = Cliente(R(503, new { success = false, codigo = "SUNAT_NO_DISPONIBLE", reintentable = true }), R(201));
+            await Assert.ThrowsAnyAsync<FactuSmartException>(() => c.Establecimientos.CrearAsync(new { codigo_anexo = "0001" }));
+            Assert.Single(m.Llamadas);
+            Assert.Empty(esperas);
+        }
+
+        [Fact]
+        public async Task Establecimientos_crear_limite_del_plan_es_RucNoAutorizado_LIMITE_ESTABLECIMIENTOS()
+        {
+            var (c, m, _) = Cliente(R(403, new { success = false, message = "Ha alcanzado el límite de 1 sucursal(es).", codigo = "LIMITE_ESTABLECIMIENTOS", reintentable = false }));
+            var e = await Assert.ThrowsAsync<RucNoAutorizado>(() => c.Establecimientos.CrearAsync(new { codigo_anexo = "0001" }));
+            Assert.Equal("LIMITE_ESTABLECIMIENTOS", e.Codigo);
+            Assert.Single(m.Llamadas);
+        }
+
+        // ───── Código de producto SUNAT ─────
+
+        [Fact]
+        public async Task BuscarProductoSunat_GET_con_q_limite_y_ruc_en_query()
+        {
+            var (c, m, _) = Cliente(R(503), R(200, new { success = true, catalogo_sunat = "25", datos = new[] { new { codigo = "43211503" } } }));
+            var r = await c.Catalogos.BuscarProductoSunatAsync("computador portátil", limite: 5);
+            Assert.Equal("43211503", r.GetProperty("datos")[0].Str("codigo"));
+            Assert.Equal(2, m.Llamadas.Count); // GET: se reintenta ante 503
+            var u = m.Llamadas[1].Url;
+            Assert.Equal("GET", m.Llamadas[1].Metodo);
+            Assert.Equal("/api/v1/issuer/catalogos/productos-sunat", u.AbsolutePath);
+            Assert.Contains("q=computador%20port%C3%A1til", u.Query);
+            Assert.Contains("limite=5", u.Query);
+            Assert.Contains("ruc=20123456789", u.Query);
+        }
+
+        [Fact]
+        public async Task BuscarProductoSunat_sin_limite_no_lo_manda_ruc_por_llamada_y_q_vacia_lanza()
+        {
+            var (c, m, _) = Cliente(R(200));
+            await c.Catalogos.BuscarProductoSunatAsync("4321", opciones: new OpcionesRuc { Ruc = "20999999999" });
+            Assert.DoesNotContain("limite", m.Llamadas[0].Url.Query);
+            Assert.Contains("ruc=20999999999", m.Llamadas[0].Url.Query);
+            await Assert.ThrowsAsync<FactuSmartException>(() => c.Catalogos.BuscarProductoSunatAsync(" "));
+            Assert.Single(m.Llamadas);
+        }
+
+        // ───── Descargar con formato ─────
+
+        [Fact]
+        public async Task Descargar_pdf_con_formato_manda_query_formato()
+        {
+            var (c, m, _) = Cliente(new RespuestaFalsa { Bytes = Encoding.ASCII.GetBytes("%PDF-1.4") });
+            var pdf = await c.Comprobantes.DescargarAsync("abc", "pdf", formato: "ticket");
+            Assert.Equal("%PDF", Encoding.ASCII.GetString(pdf, 0, 4));
+            var l = m.Llamadas.Single();
+            Assert.Equal("GET", l.Metodo);
+            Assert.Equal("/api/v1/issuer/documents/abc/pdf", l.Url.AbsolutePath);
+            Assert.Contains("formato=ticket", l.Url.Query);
+            Assert.Contains("ruc=20123456789", l.Url.Query);
+        }
+
+        [Fact]
+        public async Task Descargar_sin_formato_no_manda_el_parametro()
+        {
+            var (c, m, _) = Cliente(new RespuestaFalsa { Bytes = Encoding.ASCII.GetBytes("%PDF-1.4") });
+            await c.Comprobantes.DescargarAsync("abc", "pdf");
+            await c.Comprobantes.DescargarAsync("abc", "xml", new OpcionesRuc { Ruc = "20999999999" });
+            Assert.DoesNotContain("formato", m.Llamadas[0].Url.Query);
+            Assert.DoesNotContain("formato", m.Llamadas[1].Url.Query);
+        }
+
+        [Theory]
+        [InlineData("a4")]
+        [InlineData("a5")]
+        [InlineData("ticket80")]
+        [InlineData("ticket58")]
+        [InlineData("ticket50")]
+        public async Task Descargar_acepta_todos_los_formatos_validos(string formato)
+        {
+            var (c, m, _) = Cliente(new RespuestaFalsa { Bytes = Encoding.ASCII.GetBytes("%PDF-1.4") });
+            await c.Comprobantes.DescargarAsync("abc", "pdf", formato: formato);
+            Assert.Contains("formato=" + formato, m.Llamadas.Single().Url.Query);
+        }
+
+        [Theory]
+        [InlineData("xml")]
+        [InlineData("cdr")]
+        public async Task Descargar_formato_con_xml_o_cdr_lanza_ErrorDeValidacion_sin_peticion(string tipo)
+        {
+            var (c, m, _) = Cliente(R(200));
+            var e = await Assert.ThrowsAsync<ErrorDeValidacion>(() => c.Comprobantes.DescargarAsync("abc", tipo, formato: "ticket"));
+            Assert.Equal(422, e.Status);
+            Assert.Equal("DATOS_INVALIDOS", e.Codigo);
+            Assert.True(e.Campos.ContainsKey("formato"));
+            Assert.Empty(m.Llamadas);
+        }
+
+        [Theory]
+        [InlineData("ticket_58")]
+        [InlineData("A4")]
+        [InlineData("")]
+        public async Task Descargar_formato_invalido_lanza_ErrorDeValidacion_sin_peticion(string formato)
+        {
+            var (c, m, _) = Cliente(R(200));
+            var e = await Assert.ThrowsAsync<ErrorDeValidacion>(() => c.Comprobantes.DescargarAsync("abc", "pdf", formato: formato));
+            Assert.Equal(422, e.Status);
+            Assert.Equal("DATOS_INVALIDOS", e.Codigo);
+            Assert.False(e.Reintentable);
+            Assert.True(e.Campos["formato"].Length > 0);
+            Assert.Contains("ticket58", e.Mensaje);
+            Assert.Empty(m.Llamadas);
+        }
     }
 }

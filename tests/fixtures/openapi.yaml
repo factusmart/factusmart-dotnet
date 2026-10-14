@@ -85,6 +85,24 @@ info:
     amplías tú mismo de 50 en 50 desde tu portal de integrador: **Empresas → Ampliar límite (+50)**.
     Ver `POST /rucs`.
 
+    ## Varios locales (anexos)
+
+    Un RUC puede emitir desde varios locales registrados en SUNAT. Cada local (establecimiento) tiene
+    un **código de anexo de 4 dígitos** (`0000` = domicilio fiscal) y **sus propias series**; su
+    dirección sale en el XML y en el PDF del comprobante.
+
+    - `GET /establecimientos` lista los locales del RUC con sus series. `predeterminado: true` marca
+      el local desde donde se emite si no indicas otro.
+    - `POST /establecimientos` crea un local (y sus series). Antes regístralo en SUNAT (Clave SOL):
+      el API no lo da de alta en SUNAT. Editar o eliminar un local se hace desde el sistema web
+      (Empresa → Establecimientos).
+    - Para emitir desde un local, en `POST /documents` envía `codigo_anexo` (ej. `"0001"`; también
+      se acepta el nombre antiguo `codigo_establecimiento`), **o** solo una serie de ese local en
+      `serie_documento` (ej. `"BA02"`): el sistema usa el local dueño de esa serie. Sin ninguno de los
+      dos se emite desde el local predeterminado, como siempre.
+
+    Ninguno de estos endpoints consume crédito.
+
     ## Créditos
 
     Todo es prepago. Cuesta **1 crédito**: cada comprobante emitido (`POST /documents`), cada guía
@@ -208,6 +226,9 @@ info:
     | `LIMITE_PRUEBAS_DIARIO` | 429 | **no** | Llegaste a las 200 operaciones en modo demo de hoy. Se reinicia a medianoche (hora de Perú). Trae `pruebas_restantes_hoy: 0`, `limite_pruebas_diario` y `creditos_restantes`. |
     | `ANULACION_MIXTA` | 422 | no | `POST /anulaciones` con facturas y boletas juntas. Haz una petición para cada tipo. |
     | `ERROR_INTERNO` | 5xx | **sí** | Error interno del servidor. Reintenta; si persiste, contacta soporte. |
+    | `PDF_NO_GENERADO` | 500 | **sí** | `GET /documents/{external_id}/pdf?formato=…`: el generador de PDF falló dos veces seguidas. Reintenta en unos segundos. Nunca se entrega un PDF de otro tamaño. |
+    | `LIMITE_ESTABLECIMIENTOS` | 403 | no | `POST /establecimientos`: el plan del RUC no permite más locales. Se amplía el plan desde el sistema. |
+    | `CATALOGO_NO_DISPONIBLE` | 503 | **no** | El catálogo pedido todavía no está cargado en el servidor. Reintentar no lo arregla. |
 
     La lista puede crecer: trata un `codigo` desconocido como no reintentable salvo que
     `reintentable` diga lo contrario.
@@ -249,6 +270,8 @@ tags:
     description: Saldo de créditos, plan y series.
   - name: RUCs
     description: Alta, listado y activación/desactivación de los RUCs de la cuenta.
+  - name: Anexos
+    description: Locales (establecimientos / anexos SUNAT) de un RUC, cada uno con sus series. No consumen crédito.
   - name: Comprobantes
     description: Facturas (01), boletas (03), notas de crédito (07) y débito (08).
   - name: Anulaciones
@@ -756,6 +779,27 @@ paths:
         Si tu cuenta tiene varios RUC, indica el emisor con `?ruc=20123456789` (o el header `X-RUC`);
         sin él responde `422 RUC_REQUERIDO`. Basta el header `X-API-Key`: no hace falta un header
         `Accept` especial (la respuesta trae el `Content-Type` del archivo; los errores siempre en JSON).
+
+        **PDF en ticket u otro tamaño:** `GET /documents/{external_id}/pdf?formato=ticket`.
+
+        | `formato` | Tamaño | Ancho de página |
+        |---|---|---|
+        | *(sin formato)* | A4, igual que siempre | 210 mm |
+        | `a4` | A4 | 210 mm |
+        | `a5` | A5 apaisado | 210 × 148 mm |
+        | `ticket` o `ticket80` | Ticket de 80 mm | 78 mm |
+        | `ticket58` | Ticket de 58 mm | 56 mm |
+        | `ticket50` | Ticket de 50 mm | 45 mm |
+
+        - Es el mismo PDF que imprime el sistema web con el botón "Imprimir" en ese tamaño (mismo
+          diseño y logo del RUC). Funciona en cualquier estado, también en `01`.
+        - Pedir otro formato **no cambia** el PDF que recibe tu cliente final (correo, consulta
+          pública) ni el que descargas sin `formato`: ese sigue siendo el A4.
+        - Solo aplica al PDF: `/xml?formato=…` o `/cdr?formato=…` → `422 DATOS_INVALIDOS`. Un formato
+          inválido también → `422`, con la lista en `formatos_validos`.
+        - Si el generador falla dos veces seguidas → `500 PDF_NO_GENERADO` (reintentable). Nunca se
+          entrega un PDF de otro tamaño "disfrazado".
+        - `GET /documents/{external_id}` trae también `links.pdf_ticket` (el de 80 mm).
       parameters:
         - $ref: '#/components/parameters/ExternalId'
         - name: type
@@ -765,6 +809,16 @@ paths:
           schema:
             type: string
             enum: [pdf, xml, cdr]
+        - name: formato
+          in: query
+          required: false
+          description: |
+            Solo para `pdf`. Tamaño del PDF. Sin él, el A4 de siempre. `ticket` y `ticket80` son el
+            mismo (80 mm).
+          schema:
+            type: string
+            enum: [a4, a5, ticket, ticket80, ticket58, ticket50]
+          example: ticket
         - $ref: '#/components/parameters/RucQuery'
         - $ref: '#/components/parameters/XRucHeader'
       responses:
@@ -793,11 +847,46 @@ paths:
                 cdr:
                   value: { success: false, message: 'El CDR de este comprobante no está disponible todavía. Consulta a SUNAT con POST /documents/{external_id}/consultar-sunat y vuelve a intentar.', codigo: NO_ENCONTRADO, reintentable: false }
         '422':
-          $ref: '#/components/responses/RucRequired'
+          description: Falta el RUC, `formato` inválido, o `formato` en `xml`/`cdr`.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/Error'
+                  - $ref: '#/components/schemas/ValidationError'
+              examples:
+                rucRequerido:
+                  value: { success: false, message: 'Indica el RUC emisor en el campo "ruc".', codigo: RUC_REQUERIDO, reintentable: false }
+                formatoInvalido:
+                  summary: Formato de PDF inválido
+                  value:
+                    success: false
+                    message: 'Formato de PDF inválido: "carta". Válidos: a4, a5, ticket, ticket80, ticket58, ticket50.'
+                    codigo: DATOS_INVALIDOS
+                    reintentable: false
+                    campos: { formato: ['Debe ser uno de: a4, a5, ticket, ticket80, ticket58, ticket50.'] }
+                    formatos_validos: [a4, a5, ticket, ticket80, ticket58, ticket50]
+                formatoNoPdf:
+                  summary: formato en xml o cdr
+                  value:
+                    success: false
+                    message: 'El parámetro "formato" solo aplica al PDF (GET /documents/{external_id}/pdf).'
+                    codigo: DATOS_INVALIDOS
+                    reintentable: false
+                    campos: { formato: ['Solo aplica al PDF.'] }
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':
-          $ref: '#/components/responses/ServerErrorOrRateLimit'
+          description: Error interno, o el PDF en el `formato` pedido no se pudo generar (`PDF_NO_GENERADO`, reintentable).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                pdfNoGenerado:
+                  value: { success: false, message: 'No se pudo generar el PDF en formato ticket_58. Vuelve a intentar en unos segundos.', codigo: PDF_NO_GENERADO, reintentable: true }
+                interno:
+                  value: { success: false, message: 'Ocurrió un error interno. Intenta de nuevo en unos segundos.', codigo: ERROR_INTERNO, reintentable: true }
 
   /documents/{external_id}/reenviar:
     post:
@@ -1359,6 +1448,180 @@ paths:
               example: { success: false, message: 'Ese RUC no pertenece a esta cuenta o no existe.', codigo: NO_ENCONTRADO, reintentable: false }
         '422':
           $ref: '#/components/responses/LaravelValidation'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/ServerErrorOrRateLimit'
+
+  /establecimientos:
+    get:
+      operationId: listEstablishments
+      tags: [Anexos]
+      summary: Listar locales (anexos) del RUC
+      description: |
+        Locales del RUC registrados en FactuSmart, con su código de anexo SUNAT y sus series de
+        comprobantes (01, 03, 07, 08, 09, 31, 20, 40, 04). `predeterminado: true` = el local desde
+        donde emite `POST /documents` si no envías `codigo_anexo`. Requiere RUC. No consume crédito.
+      parameters:
+        - $ref: '#/components/parameters/RucQuery'
+        - $ref: '#/components/parameters/XRucHeader'
+      responses:
+        '200':
+          description: Locales del RUC.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EstablishmentListResponse'
+              example:
+                success: true
+                establecimientos:
+                  - id: 1
+                    codigo_anexo: "0000"
+                    nombre: Oficina Principal
+                    direccion: Av. Arequipa 1234
+                    ubigeo: "150101"
+                    departamento: LIMA
+                    provincia: Lima
+                    distrito: Lima
+                    telefono: null
+                    email: ventas@miempresa.pe
+                    predeterminado: true
+                    series:
+                      - { serie: FA01, codigo_tipo_documento: "01", tipo: Factura }
+                      - { serie: BA01, codigo_tipo_documento: "03", tipo: Boleta de venta }
+                  - id: 2
+                    codigo_anexo: "0001"
+                    nombre: Tienda Miraflores
+                    direccion: Av. Larco 345
+                    ubigeo: "150122"
+                    departamento: LIMA
+                    provincia: Lima
+                    distrito: Miraflores
+                    telefono: "014445566"
+                    email: null
+                    predeterminado: false
+                    series:
+                      - { serie: FA02, codigo_tipo_documento: "01", tipo: Factura }
+                      - { serie: B002, codigo_tipo_documento: "03", tipo: Boleta de venta }
+                      - { serie: BA02, codigo_tipo_documento: "03", tipo: Boleta de venta }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RucForbidden'
+        '422':
+          $ref: '#/components/responses/RucRequired'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/ServerErrorOrRateLimit'
+    post:
+      operationId: createEstablishment
+      tags: [Anexos]
+      summary: Crear un local (anexo)
+      description: |
+        Crea un local del RUC con su almacén y sus series, igual que el sistema web (Empresa →
+        Establecimientos) y con sus mismas reglas. No consume crédito.
+
+        - Registra antes el anexo en SUNAT (Clave SOL): el API no lo da de alta en SUNAT.
+        - `codigo_anexo` (4 dígitos) y `nombre` deben ser únicos dentro del RUC.
+        - `crear_series_por_defecto` (por defecto `true`) crea las series del local como la web
+          (`FA0N`, `BA0N`, `FN0N`, `BN0N`, `FD0N`, `BD0N`, guías…). Con `false` solo se crean el
+          almacén y las `series` que envíes.
+        - `series` agrega series propias (máx. 20; tipos `01`, `03`, `07`, `08`; 4 caracteres; factura
+          `F` + 3, boleta `B` + 3; las notas empiezan con `F` o `B`). Una serie ya usada en el RUC → `422`.
+        - El plan del RUC limita cuántos locales puede tener → `403 LIMITE_ESTABLECIMIENTOS`.
+        - Con la llave de prueba (`fs_test_…`) solo en RUCs en modo demo; en producción →
+          `403 LLAVE_DE_PRUEBA_EN_PRODUCCION`.
+        - Editar o eliminar un local se hace desde el sistema web.
+      parameters:
+        - $ref: '#/components/parameters/RucQuery'
+        - $ref: '#/components/parameters/XRucHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateEstablishmentRequest'
+            example:
+              ruc: "20123456789"
+              codigo_anexo: "0001"
+              nombre: Tienda Miraflores
+              direccion: Av. Larco 345
+              ubigeo: "150122"
+              telefono: "014445566"
+              series:
+                - { codigo_tipo_documento: "03", serie: B002 }
+      responses:
+        '201':
+          description: Local creado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateEstablishmentResponse'
+              example:
+                success: true
+                message: 'Establecimiento creado. Para emitir desde él envía "codigo_anexo": "0001" en POST /documents.'
+                establecimiento:
+                  id: 2
+                  codigo_anexo: "0001"
+                  nombre: Tienda Miraflores
+                  direccion: Av. Larco 345
+                  ubigeo: "150122"
+                  departamento: LIMA
+                  provincia: Lima
+                  distrito: Miraflores
+                  telefono: "014445566"
+                  email: null
+                  predeterminado: false
+                  series:
+                    - { serie: FA02, codigo_tipo_documento: "01", tipo: Factura }
+                    - { serie: B002, codigo_tipo_documento: "03", tipo: Boleta de venta }
+                    - { serie: BA02, codigo_tipo_documento: "03", tipo: Boleta de venta }
+                    - { serie: BN02, codigo_tipo_documento: "07", tipo: Nota de crédito }
+                    - { serie: FN02, codigo_tipo_documento: "07", tipo: Nota de crédito }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: |
+            El RUC no pertenece a la cuenta o está desactivado, llave de prueba en un RUC en producción,
+            o el plan del RUC no permite más locales (`LIMITE_ESTABLECIMIENTOS`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                limite:
+                  summary: Límite de locales del plan
+                  value: { success: false, message: 'Ha alcanzado el límite de 1 sucursal(es) permitidas por su plan. Elimine una sucursal o amplíe su plan.', codigo: LIMITE_ESTABLECIMIENTOS, reintentable: false }
+                llavePrueba:
+                  value: { success: false, message: 'Estás usando tu llave de PRUEBA y este RUC está en producción. La llave de prueba solo emite, anula y reenvía en RUCs en modo demo. Usa tu llave de producción.', codigo: LLAVE_DE_PRUEBA_EN_PRODUCCION, reintentable: false }
+                ajeno:
+                  value: { success: false, message: 'El RUC indicado no pertenece a esta cuenta o no existe.', codigo: RUC_NO_AUTORIZADO, reintentable: false }
+        '422':
+          description: Falta el RUC, o los datos no pasan la validación (detalle por campo en `campos`).
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/Error'
+                  - $ref: '#/components/schemas/ValidationError'
+              examples:
+                validacion:
+                  value:
+                    success: false
+                    message: 'Datos inválidos: …'
+                    codigo: DATOS_INVALIDOS
+                    reintentable: false
+                    campos:
+                      nombre: [Ya existe un establecimiento con ese nombre.]
+                      ubigeo: ['ubigeo inválido: envía el código de distrito INEI de 6 dígitos (ej. 150122 = Miraflores, Lima).']
+                      direccion: [El campo direccion es obligatorio.]
+                      codigo_anexo: ['codigo_anexo debe ser el código de 4 dígitos que SUNAT asignó al local (ej. "0001"; "0000" es el domicilio fiscal).']
+                      series.0.serie: ['El formato de la serie es inválido - Formato del campo: [B][A-Z0-9]{3}, Ejemplo: B001']
+                      series.1.serie: [La serie FA01 ya ha sido registrada en este RUC.]
+                      series.2.codigo_tipo_documento: ['Debe ser uno de: 01, 03, 07, 08.']
+                rucRequerido:
+                  value: { success: false, message: 'Indica el RUC emisor en el campo "ruc" (tu cuenta tiene varios RUCs enlazados).', codigo: RUC_REQUERIDO, reintentable: false }
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':
@@ -1991,6 +2254,9 @@ components:
         - LIMITE_PRUEBAS_DIARIO
         - ANULACION_MIXTA
         - ERROR_INTERNO
+        - PDF_NO_GENERADO
+        - LIMITE_ESTABLECIMIENTOS
+        - CATALOGO_NO_DISPONIBLE
     Error:
       type: object
       description: |
@@ -2218,9 +2484,17 @@ components:
           type: string
           pattern: '^\d{11}$'
           description: RUC emisor. Obligatorio si la cuenta tiene varios RUCs.
+        codigo_anexo:
+          type: string
+          pattern: '^\d{4}$'
+          description: |
+            Código de anexo del local desde el que se emite (ej. `0001`), el de `GET /establecimientos`.
+            Si no lo envías: el local dueño de la `serie_documento` enviada o, sin serie, el local
+            predeterminado (`0000`). Un código que no existe en el RUC → `422 DATOS_INVALIDOS`.
+          examples: ["0001"]
         codigo_establecimiento:
           type: string
-          description: Código del local desde el que se emite (ej. `0001`). Por defecto, el establecimiento del admin (`0000`).
+          description: Nombre antiguo de `codigo_anexo` (mismo dato; se aceptan los dos). Si envías ambos, gana este.
         serie_documento:
           type: string
           description: Serie (ej. FA01, BA01, FN01). Opcional si el establecimiento tiene una sola serie para el tipo.
@@ -2601,6 +2875,7 @@ components:
               description: URLs absolutas de descarga (incluyen `?ruc=` si lo enviaste).
               properties:
                 pdf: { type: string, format: uri }
+                pdf_ticket: { type: string, format: uri, description: 'El mismo PDF en ticket de 80 mm (`?formato=ticket`).' }
                 xml: { type: string, format: uri }
                 cdr: { type: string, format: uri }
         - $ref: '#/components/schemas/SunatFeedback'
@@ -3001,6 +3276,84 @@ components:
         porcentaje: { type: [number, string, "null"], description: Solo en detracciones. }
 
     # ───────────── RUCs ─────────────
+    # ───────────── Anexos (establecimientos) ─────────────
+    Establecimiento:
+      type: object
+      required: [id, codigo_anexo, nombre, predeterminado, series]
+      properties:
+        id: { type: integer }
+        codigo_anexo: { type: string, pattern: '^\d{4}$', description: 'Código de anexo SUNAT del local (`0000` = domicilio fiscal). Es el que envías en `codigo_anexo` al emitir.', examples: ["0001"] }
+        nombre: { type: string }
+        direccion: { type: [string, "null"] }
+        ubigeo: { type: [string, "null"], description: Código INEI del distrito (6 dígitos). }
+        departamento: { type: [string, "null"] }
+        provincia: { type: [string, "null"] }
+        distrito: { type: [string, "null"] }
+        telefono: { type: [string, "null"] }
+        email: { type: [string, "null"] }
+        predeterminado: { type: boolean, description: 'true = el local desde donde emite `POST /documents` si no envías `codigo_anexo`.' }
+        series:
+          type: array
+          description: Series de comprobantes SUNAT del local (01, 03, 07, 08, 09, 31, 20, 40, 04).
+          items:
+            type: object
+            properties:
+              serie: { type: string, examples: [BA02] }
+              codigo_tipo_documento: { type: string, examples: ["03"] }
+              tipo: { type: [string, "null"], examples: [Boleta de venta] }
+    EstablishmentListResponse:
+      type: object
+      required: [success, establecimientos]
+      properties:
+        success: { type: boolean, const: true }
+        establecimientos:
+          type: array
+          items: { $ref: '#/components/schemas/Establecimiento' }
+    CreateEstablishmentRequest:
+      type: object
+      required: [codigo_anexo, nombre, direccion, ubigeo]
+      properties:
+        ruc:
+          type: string
+          pattern: '^\d{11}$'
+          description: RUC emisor. Obligatorio si la cuenta tiene varios RUCs.
+        codigo_anexo:
+          type: string
+          pattern: '^\d{4}$'
+          description: Código de 4 dígitos que SUNAT asignó al local. Único en el RUC.
+        nombre:
+          type: string
+          description: Nombre del local. Único en el RUC.
+        direccion:
+          type: string
+        ubigeo:
+          type: string
+          pattern: '^\d{6}$'
+          description: Código INEI del distrito, 6 dígitos (ej. `150122` = Miraflores, Lima).
+        telefono: { type: string }
+        email: { type: string, format: email }
+        crear_series_por_defecto:
+          type: boolean
+          default: true
+          description: Crea las series del local igual que el sistema web (`FA0N`, `BA0N`, `FN0N`, `BN0N`, `FD0N`, `BD0N`, guías…).
+        series:
+          type: array
+          maxItems: 20
+          description: Series extra del local.
+          items:
+            type: object
+            required: [codigo_tipo_documento, serie]
+            properties:
+              codigo_tipo_documento: { type: string, enum: ["01", "03", "07", "08"] }
+              serie: { type: string, pattern: '^[A-Za-z0-9]{4}$', description: 'Factura `F` + 3, boleta `B` + 3; notas empiezan con `F` o `B`.', examples: [B002] }
+    CreateEstablishmentResponse:
+      type: object
+      required: [success, message, establecimiento]
+      properties:
+        success: { type: boolean, const: true }
+        message: { type: string }
+        establecimiento: { $ref: '#/components/schemas/Establecimiento' }
+
     RucListResponse:
       type: object
       required: [success, rucs]
