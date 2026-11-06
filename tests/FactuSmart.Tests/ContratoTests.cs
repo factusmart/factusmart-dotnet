@@ -18,7 +18,9 @@ namespace FactuSmart.Tests
         /// <summary>operationId → ruta del método ("Recurso.Metodo" en la instancia, o "FactuSmartClient.Metodo" estático).</summary>
         public static readonly IReadOnlyDictionary<string, string> Metodos = new Dictionary<string, string>
         {
+            ["apiRoot"] = "RaizAsync",
             ["ping"] = "PingAsync",
+            ["lookupDocument"] = "ConsultarDocumentoAsync",
             ["getAccount"] = "Cuenta.SaldoAsync",
             ["listSeries"] = "Series.ListarAsync",
             ["emitDocument"] = "Comprobantes.EmitirAsync",
@@ -67,7 +69,7 @@ namespace FactuSmart.Tests
 
             var sobran = Metodos.Keys.Where(k => !ids.Contains(k)).ToList();
             Assert.True(sobran.Count == 0, "métodos del SDK cuyo operationId ya no está en el yaml: " + string.Join(", ", sobran));
-            Assert.Equal(24, ids.Count);
+            Assert.Equal(26, ids.Count);
         }
 
         private static bool Existe(string ruta)

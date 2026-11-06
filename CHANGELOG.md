@@ -1,5 +1,17 @@
 # Cambios
 
+## 0.2.0 — 2026-11-06
+
+- Consultas de RUC y DNI (`GET /consultas/{tipo}/{numero}`, operationId `lookupDocument`):
+  `ConsultarRucAsync(numero)`, `ConsultarDniAsync(numero)` y `ConsultarDocumentoAsync(tipo, numero)`.
+  Devuelven el modelo tipado `ConsultaDocumento` (`Nombre`, `Direccion`, `Estado`, `Condicion`, `Ubigeo`
+  —estos cuatro pueden ser null—, `DesdeCache`, `ConsultasRestantes`, `Periodo`, `SeRenueva` y el JSON
+  crudo en `Respuesta`). No mandan RUC emisor (ni `?ruc=` ni header). Se reintentan como un GET.
+- `RaizAsync()` (`GET /`, operationId `apiRoot`): comprueba que el API responde.
+- Códigos `LIMITE_CONSULTAS` (429, no reintentable) y `CONSULTA_NO_DISPONIBLE` (503, reintentable)
+  en `CodigosDeError`. Prueba de que el 429 `LIMITE_CONSULTAS` lanza tras una sola petición.
+- Fixture `tests/fixtures/openapi.yaml` actualizada (26 operationId).
+
 ## 0.1.0 — 2026-10-14
 
 - Primera versión (sin publicar en NuGet). Paridad con los SDK de Node 1.1.0, PHP 0.2.0 y Python 0.2.0:

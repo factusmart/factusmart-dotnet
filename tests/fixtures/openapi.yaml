@@ -82,8 +82,13 @@ info:
     la cuenta).
 
     Cada cuenta empieza con un tope de **50 RUCs** (freno de seguridad, no límite comercial). Lo
-    amplías tú mismo de 50 en 50 desde tu portal de integrador: **Empresas → Ampliar límite (+50)**.
-    Ver `POST /rucs`.
+    amplías tú mismo de 50 en 50 desde tu portal de integrador: **Empresas → Ampliar límite (+50)**,
+    siempre que tengas un **plan activo** o que al menos **la mitad de tus RUCs ya estén en
+    producción**. Si no cumples ninguna de las dos, pasa a producción tus empresas o escríbenos por
+    WhatsApp +51 914 266 974. Ver `POST /rucs`.
+
+    Solo se aceptan **RUC válidos**: 11 dígitos, prefijo `10`, `15`, `17` o `20` y dígito
+    verificador (módulo 11 de SUNAT) correcto. Un RUC inventado responde `422` (`DATOS_INVALIDOS`).
 
     ## Varios locales (anexos)
 
@@ -112,7 +117,11 @@ info:
     falla con error (respuesta `422`). Ojo: si el comprobante se genera pero SUNAT no lo acepta
     (queda en estado `01`), la respuesta es `200` y el crédito **sí** se cobra; se reintenta gratis con
     `/reenviar`. Consultar, listar, descargar, ver saldo, `/calcular` y `/catalogos` es gratis.
-    Sin saldo → `402`.
+    Sin saldo → `402` (`SIN_CREDITOS`): sube de plan o pide créditos extra para tu plan.
+
+    Si tu **plan vence**, la emisión se pausa (`402` `PLAN_VENCIDO`) hasta que lo renueves; tus
+    créditos extra se conservan (cada paquete mantiene su vigencia de 12 meses) y vuelves a usarlos
+    al renovar.
 
     Las respuestas de `POST /documents`, `POST /guias` y `POST /anulaciones` traen
     `creditos_restantes` (tu saldo real tras la operación) y `credito_cobrado` (`true` si esta
@@ -144,6 +153,12 @@ info:
     modos. Cada comprobante informa en qué entorno salió (`entorno`: `prueba`/`produccion`,
     `tiene_validez_fiscal`).
 
+    **Ojo con OSE:** si el RUC envía sus comprobantes por un **OSE** (operador de servicios
+    electrónicos) en vez de directo a SUNAT, el envío va siempre con el certificado y el usuario SOL
+    reales y tiene validez fiscal, aunque el RUC figure en "prueba". Por eso la API lo trata como
+    **producción**: cobra crédito, la llave de prueba no emite en él, y `entorno` es `produccion`
+    (`GET /rucs` también lo muestra en `produccion`).
+
     ## Idempotencia
 
     `POST /documents` acepta el header `Idempotency-Key` (único por venta). Si reintentas con la misma
@@ -160,9 +175,13 @@ info:
     secreto `whsec_…` y puedes enviar un aviso de prueba. No hay endpoint del API para configurarlo.
 
     - Firma: header `X-FactuSmart-Firma` = HMAC-SHA256 (hex) del **cuerpo crudo** con tu secreto.
-      Los SDK traen `verificarFirmaWebhook` / `verificar_firma_webhook`.
-    - Responde `2xx` en menos de **8 segundos**. Si no, se reintenta: 6 intentos en total
+      Los cinco SDK (PHP, Node.js, Python, Java y C#) traen la función lista: `verificarFirmaWebhook`,
+      `verificar_firma_webhook` o `VerificarFirmaWebhook`, según el lenguaje.
+    - Responde `2xx` en menos de **5 segundos**. Si no, se reintenta: 6 intentos en total
       (inmediato, +1 min, +5 min, +30 min, +2 h, +6 h). No se siguen redirecciones.
+    - Si tu servidor falla **10 envíos seguidos**, los avisos de tu cuenta se **pausan** (los
+      pendientes quedan como Error, sin enviarse) hasta que guardes de nuevo la URL en el portal o un
+      "Enviar prueba" salga bien.
     - El `id` del aviso es el mismo en todos los reintentos: úsalo para no procesarlo dos veces.
 
     El detalle del payload y los headers está en la sección `webhooks` (`comprobanteEstado`).
@@ -229,6 +248,8 @@ info:
     | `PDF_NO_GENERADO` | 500 | **sí** | `GET /documents/{external_id}/pdf?formato=…`: el generador de PDF falló dos veces seguidas. Reintenta en unos segundos. Nunca se entrega un PDF de otro tamaño. |
     | `LIMITE_ESTABLECIMIENTOS` | 403 | no | `POST /establecimientos`: el plan del RUC no permite más locales. Se amplía el plan desde el sistema. |
     | `CATALOGO_NO_DISPONIBLE` | 503 | **no** | El catálogo pedido todavía no está cargado en el servidor. Reintentar no lo arregla. |
+    | `LIMITE_CONSULTAS` | 429 | **no** | `GET /consultas/{tipo}/{numero}`: se acabó tu cupo de consultas DNI/RUC del periodo (2× el cupo del plan al mes, o 50 al día sin plan). Trae `consultas_restantes: 0`, `limite_consultas`, `periodo` y `se_renueva`. |
+    | `CONSULTA_NO_DISPONIBLE` | 503 | **sí** | `GET /consultas/{tipo}/{numero}`: ni SUNAT ni el proveedor de respaldo respondieron. No descontó del cupo. |
 
     La lista puede crecer: trata un `codigo` desconocido como no reintentable salvo que
     `reintentable` diga lo contrario.
@@ -284,6 +305,36 @@ tags:
     description: Avisos que FactuSmart envía a tu servidor cuando cambia el estado de un comprobante.
 
 paths:
+  /:
+    get:
+      operationId: apiRoot
+      tags: [Utilidades]
+      summary: Raíz del API (sin llave)
+      description: |
+        Confirma que el servicio responde y dónde está la documentación. **No requiere API key** ni
+        consume crédito. Para comprobar tu llave usa `GET /ping`.
+      security: []
+      responses:
+        '200':
+          description: El API responde.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, api, docs, estado]
+                properties:
+                  success: { type: boolean }
+                  api: { type: string }
+                  docs: { type: string, format: uri }
+                  estado: { type: string, enum: [ok] }
+              example:
+                success: true
+                api: FactuSmart API de facturación
+                docs: https://factusmart.pe/api-facturacion-electronica/docs
+                estado: ok
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
   /ping:
     get:
       operationId: ping
@@ -309,7 +360,7 @@ paths:
                 cuenta: Mi Integración
                 creditos: 4830
                 tipo_llave: produccion
-                ruc_emisor: "20123456789"
+                ruc_emisor: "20100070970"
                 razon_social: MI EMPRESA
         '401':
           $ref: '#/components/responses/Unauthorized'
@@ -422,7 +473,7 @@ paths:
               facturaMinima:
                 summary: Factura mínima (sin serie, cliente solo con RUC)
                 value:
-                  ruc: "20123456789"
+                  ruc: "20100070970"
                   numero_documento: "#"
                   fecha_de_emision: "2026-07-08"
                   hora_de_emision: "10:30:00"
@@ -456,7 +507,7 @@ paths:
               boleta:
                 summary: Boleta a cliente con DNI
                 value:
-                  ruc: "20123456789"
+                  ruc: "20100070970"
                   numero_documento: "#"
                   fecha_de_emision: "2026-07-08"
                   hora_de_emision: "10:30:00"
@@ -490,7 +541,7 @@ paths:
               notaDeCredito:
                 summary: Nota de crédito (anulación de la operación) referida por serie-número
                 value:
-                  ruc: "20123456789"
+                  ruc: "20100070970"
                   serie_documento: FN01
                   numero_documento: "#"
                   fecha_de_emision: "2026-07-08"
@@ -530,7 +581,7 @@ paths:
               facturaConDetraccion:
                 summary: Factura sujeta a detracción (operación 1001)
                 value:
-                  ruc: "20123456789"
+                  ruc: "20100070970"
                   numero_documento: "#"
                   fecha_de_emision: "2026-07-08"
                   hora_de_emision: "10:30:00"
@@ -570,7 +621,7 @@ paths:
               facturaAlCredito:
                 summary: Factura al crédito con cuotas, orden de compra e información adicional
                 value:
-                  ruc: "20123456789"
+                  ruc: "20100070970"
                   numero_documento: "#"
                   fecha_de_emision: "2026-07-08"
                   hora_de_emision: "10:30:00"
@@ -585,7 +636,7 @@ paths:
                   informacion_adicional: Entrega en almacén central
                   datos_del_cliente_o_receptor:
                     codigo_tipo_documento_identidad: "6"
-                    numero_documento: "20555555555"
+                    numero_documento: "20131312955"
                   totales:
                     total_operaciones_gravadas: 200.00
                     total_igv: 36.00
@@ -776,7 +827,7 @@ paths:
         Si el comprobante o el archivo (PDF, XML o CDR) no existen, responde `404` JSON con
         `codigo: NO_ENCONTRADO` (si falta el CDR, consulta a SUNAT con `/consultar-sunat` y reintenta).
 
-        Si tu cuenta tiene varios RUC, indica el emisor con `?ruc=20123456789` (o el header `X-RUC`);
+        Si tu cuenta tiene varios RUC, indica el emisor con `?ruc=20100070970` (o el header `X-RUC`);
         sin él responde `422 RUC_REQUERIDO`. Basta el header `X-API-Key`: no hace falta un header
         `Accept` especial (la respuesta trae el `Content-Type` del archivo; los errores siempre en JSON).
 
@@ -908,7 +959,7 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/RucOnlyBody'
-            example: { ruc: "20123456789" }
+            example: { ruc: "20100070970" }
       responses:
         '200':
           description: Reintento ejecutado.
@@ -956,7 +1007,7 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/RucOnlyBody'
-            example: { ruc: "20123456789" }
+            example: { ruc: "20100070970" }
       responses:
         '200':
           description: Consulta realizada.
@@ -1046,7 +1097,7 @@ paths:
             schema:
               $ref: '#/components/schemas/VoidRequest'
             example:
-              ruc: "20123456789"
+              ruc: "20100070970"
               fecha_de_emision_de_documentos: "08-07-2026"
               documentos:
                 - external_id: 9822f52c-108e-47ff-9d2e-5f0c3c1a7b11
@@ -1208,6 +1259,10 @@ paths:
         - El establecimiento se indica con `datos_del_emisor.codigo_del_domicilio_fiscal` (no con
           `codigo_establecimiento`).
         - Para `09` (remitente) el bloque `datos_del_cliente_o_receptor` es obligatorio.
+        - Para `31` (transportista) no se envía `datos_del_cliente_o_receptor`: se informan `datos_remitente`,
+          `datos_destinatario` y `direcciones_proveedores` (ubigeo y dirección de cada uno), más `vehiculo` y `chofer`.
+        - Motivo `04` (traslado entre establecimientos): el destinatario es el mismo RUC emisor y
+          `direccion_llegada.codigo_del_domicilio_fiscal` es el código del otro establecimiento.
         - No usa `Idempotency-Key`.
       parameters:
         - $ref: '#/components/parameters/XRucHeader'
@@ -1221,7 +1276,7 @@ paths:
               remitenteTransportePrivado:
                 summary: Guía del remitente, transporte privado
                 value:
-                  ruc: "20123456789"
+                  ruc: "20100070970"
                   serie_documento: TA01
                   numero_documento: "#"
                   fecha_de_emision: "2026-07-08"
@@ -1230,7 +1285,7 @@ paths:
                   datos_del_emisor: { codigo_del_domicilio_fiscal: "0000" }
                   datos_del_cliente_o_receptor:
                     codigo_tipo_documento_identidad: "6"
-                    numero_documento: "20555555555"
+                    numero_documento: "20131312955"
                     apellidos_y_nombres_o_razon_social: EMPRESA DESTINO S.A.C.
                   codigo_motivo_traslado: "01"
                   descripcion_motivo_traslado: Venta
@@ -1258,6 +1313,126 @@ paths:
                       descripcion: Producto trasladado
                       unidad_de_medida: NIU
                       cantidad: 10
+              remitenteTransportePublico:
+                summary: Guía del remitente, transporte público (modo 01)
+                value:
+                  ruc: "20100070970"
+                  serie_documento: TA01
+                  numero_documento: "#"
+                  fecha_de_emision: "2026-10-14"
+                  hora_de_emision: "10:30:00"
+                  codigo_tipo_documento: "09"
+                  datos_del_emisor: { codigo_del_domicilio_fiscal: "0000" }
+                  datos_del_cliente_o_receptor:
+                    codigo_tipo_documento_identidad: "6"
+                    numero_documento: "20131312955"
+                    apellidos_y_nombres_o_razon_social: EMPRESA DESTINO S.A.C.
+                  codigo_motivo_traslado: "01"
+                  descripcion_motivo_traslado: Venta
+                  fecha_de_traslado: "2026-10-14"
+                  peso_total: 120
+                  unidad_peso_total: KGM
+                  numero_de_bultos: 4
+                  codigo_modo_transporte: "01"
+                  transportista:
+                    codigo_tipo_documento_identidad: "6"
+                    numero_documento: "20512528458"
+                    apellidos_y_nombres_o_razon_social: TRANSPORTES RAPIDOS S.A.C.
+                    numero_mtc: "1234567"
+                  direccion_partida:
+                    ubigeo: "150101"
+                    direccion: Av. Partida 123 - Lima
+                    codigo_del_domicilio_fiscal: "0000"
+                  direccion_llegada:
+                    ubigeo: "150203"
+                    direccion: Av. Llegada 456 - Barranca
+                    codigo_del_domicilio_fiscal: "-"
+                  items:
+                    - codigo_interno: PROD-001
+                      descripcion: Producto trasladado
+                      unidad_de_medida: NIU
+                      cantidad: 10
+              transportista31:
+                summary: Guía del transportista (tipo 31)
+                value:
+                  ruc: "20100070970"
+                  serie_documento: VA01
+                  numero_documento: "#"
+                  fecha_de_emision: "2026-10-14"
+                  hora_de_emision: "11:00:00"
+                  codigo_tipo_documento: "31"
+                  datos_del_emisor: { codigo_del_domicilio_fiscal: "0000" }
+                  datos_remitente:
+                    codigo_tipo_documento_identidad: "6"
+                    descripcion_tipo_documento_identidad: RUC
+                    numero_documento: "20131312955"
+                    apellidos_y_nombres_o_razon_social: EMPRESA REMITENTE S.A.C.
+                  datos_destinatario:
+                    codigo_tipo_documento_identidad: "6"
+                    descripcion_tipo_documento_identidad: RUC
+                    numero_documento: "20512528458"
+                    apellidos_y_nombres_o_razon_social: EMPRESA DESTINATARIA S.A.
+                  direcciones_proveedores:
+                    remitente: { ubigeo: "150101", direccion: Av. Partida 123 - Lima }
+                    destinatario: { ubigeo: "150203", direccion: Av. Llegada 456 - Barranca }
+                  codigo_motivo_traslado: "01"
+                  descripcion_motivo_traslado: Venta
+                  fecha_de_traslado: "2026-10-14"
+                  peso_total: 800
+                  unidad_peso_total: KGM
+                  numero_de_bultos: 20
+                  codigo_modo_transporte: "02"
+                  vehiculo: { numero_de_placa: ABC123 }
+                  chofer:
+                    codigo_tipo_documento_identidad: "1"
+                    numero_documento: "12345678"
+                    nombres: Juan Pérez
+                    numero_licencia: Q12345678
+                  items:
+                    - codigo_interno: PROD-001
+                      descripcion: Carga paletizada
+                      unidad_de_medida: NIU
+                      cantidad: 20
+              trasladoEntreEstablecimientos:
+                summary: Traslado entre establecimientos de la misma empresa (motivo 04)
+                value:
+                  ruc: "20100070970"
+                  serie_documento: TA01
+                  numero_documento: "#"
+                  fecha_de_emision: "2026-10-14"
+                  hora_de_emision: "11:30:00"
+                  codigo_tipo_documento: "09"
+                  datos_del_emisor: { codigo_del_domicilio_fiscal: "0000" }
+                  datos_del_cliente_o_receptor:
+                    codigo_tipo_documento_identidad: "6"
+                    numero_documento: "20100070970"
+                    apellidos_y_nombres_o_razon_social: MI EMPRESA S.A.C.
+                  codigo_motivo_traslado: "04"
+                  descripcion_motivo_traslado: Traslado entre establecimientos de la misma empresa
+                  fecha_de_traslado: "2026-10-14"
+                  peso_total: 60
+                  unidad_peso_total: KGM
+                  numero_de_bultos: 3
+                  codigo_modo_transporte: "02"
+                  direccion_partida:
+                    ubigeo: "150101"
+                    direccion: Av. Principal 100 - Lima (local principal)
+                    codigo_del_domicilio_fiscal: "0000"
+                  direccion_llegada:
+                    ubigeo: "150131"
+                    direccion: Jr. Los Olivos 250 - San Isidro (sucursal)
+                    codigo_del_domicilio_fiscal: "0001"
+                  vehiculo: { numero_de_placa: ABC123 }
+                  chofer:
+                    codigo_tipo_documento_identidad: "1"
+                    numero_documento: "12345678"
+                    nombres: Juan Pérez
+                    numero_licencia: Q12345678
+                  items:
+                    - codigo_interno: PROD-001
+                      descripcion: Mercadería para reposición de sucursal
+                      unidad_de_medida: NIU
+                      cantidad: 25
       responses:
         '200':
           description: Guía creada (revisa `enviado`).
@@ -1349,11 +1524,18 @@ paths:
         ya pertenece a esta cuenta devuelve `200` con `ya_existia: true`. Si pertenece a otra cuenta →
         `409`. No consume crédito.
 
+        **RUC válido.** `ruc` debe tener 11 dígitos, empezar con `10`, `15`, `17` o `20` y tener el
+        dígito verificador correcto (módulo 11 de SUNAT). Si no → `422` (`DATOS_INVALIDOS`, con
+        `campos.ruc`). La idempotencia va primero: reintentar con un RUC que ya es de tu cuenta sigue
+        devolviendo `200`.
+
         **Tope de RUCs (ampliable).** Cada cuenta empieza con un tope de **50 RUCs**. Es solo un freno
         de seguridad (que un error en tu sistema no cree empresas en masa), no un límite comercial.
         Al alcanzarlo, esta llamada responde `422` (`codigo: DATOS_INVALIDOS`) con el mensaje
         "Alcanzaste el máximo de N RUCs…". Lo amplías tú mismo, sin costo, de 50 en 50 desde tu portal
-        de integrador: **Empresas → Ampliar límite (+50)**.
+        de integrador (**Empresas → Ampliar límite (+50)**) si tienes un **plan activo** o al menos
+        **la mitad de tus RUCs están en producción**. Si no, pasa a producción tus empresas o
+        escríbenos por WhatsApp +51 914 266 974.
       requestBody:
         required: true
         content:
@@ -1361,7 +1543,7 @@ paths:
             schema:
               $ref: '#/components/schemas/CreateRucRequest'
             example:
-              ruc: "20609999991"
+              ruc: "20609999994"
               empresa: Mi Cliente SAC
               correo: contacto@micliente.pe
               clave: una-clave-de-al-menos-6-caracteres
@@ -1398,7 +1580,10 @@ paths:
               examples:
                 topeAlcanzado:
                   summary: Tope de RUCs alcanzado (amplíalo desde el portal)
-                  value: { success: false, message: 'Alcanzaste el máximo de 50 RUCs. Amplíalo tú mismo desde tu portal de integrador (Empresas → Ampliar límite).', codigo: DATOS_INVALIDOS, reintentable: false }
+                  value: { success: false, message: 'Alcanzaste el máximo de 50 RUCs. Puedes ampliarlo desde tu portal de integrador (Empresas → Ampliar límite) si tienes un plan activo o al menos la mitad de tus empresas ya están en producción. Si no, escríbenos por WhatsApp +51 914 266 974.', codigo: DATOS_INVALIDOS, reintentable: false }
+                rucInvalido:
+                  summary: RUC con dígito verificador incorrecto
+                  value: { success: false, message: 'El RUC no es válido: debe tener 11 dígitos, empezar con 10, 15, 17 o 20 y su dígito verificador debe ser correcto.', codigo: DATOS_INVALIDOS, reintentable: false, campos: { ruc: ['El RUC no es válido: debe tener 11 dígitos, empezar con 10, 15, 17 o 20 y su dígito verificador debe ser correcto.'] } }
         '500':
           description: Plan de integradores no configurado en el servidor o error interno.
           content:
@@ -1543,7 +1728,7 @@ paths:
             schema:
               $ref: '#/components/schemas/CreateEstablishmentRequest'
             example:
-              ruc: "20123456789"
+              ruc: "20100070970"
               codigo_anexo: "0001"
               nombre: Tienda Miraflores
               direccion: Av. Larco 345
@@ -2040,6 +2225,213 @@ paths:
         '500':
           $ref: '#/components/responses/ServerErrorOrRateLimit'
 
+  /consultas/{tipo}/{numero}:
+    get:
+      operationId: lookupDocument
+      tags: [Herramientas]
+      summary: Consultar un RUC o DNI
+      description: |
+        Devuelve el nombre (razón social o nombres completos) y, si la fuente los trae, dirección,
+        estado, condición y ubigeo de un **RUC** o **DNI**. Sirve para llenar los datos del cliente
+        antes de emitir. **No emite nada, no gasta créditos y no necesita RUC** (si mandas `?ruc=` se
+        ignora). Funciona con la llave de producción y con la de prueba (`fs_test_…`).
+
+        **Fuente:** la misma que usa FactuSmart al buscar un cliente: SUNAT directo primero y, si no
+        responde o no lo tiene, un proveedor de respaldo. SUNAT directo **no trae** `estado` ni
+        `condicion` del RUC (vienen `null`) y del DNI solo trae el nombre (`direccion`, `ubigeo`,
+        `estado` y `condicion` en `null`). Carné de extranjería: no hay fuente pública, no se consulta.
+
+        **Cupo de consultas por cuenta** (todas tus empresas y tus dos llaves juntas; aparte de tus
+        créditos de comprobantes):
+
+        | Cuenta | Cupo | `periodo` |
+        |---|---|---|
+        | Con plan activo | **2 × el cupo mensual de comprobantes del plan** (Starter 3,000 · Pro 10,000 · Business 30,000), por mes de tu plan | `mes` |
+        | Sin plan | **50 por día** (se renueva a medianoche, hora de Perú) | `dia` |
+
+        - Cada número consultado se guarda **30 días**: repetirlo responde con `desde_cache: true` y
+          **no descuenta** del cupo (aunque ya lo hayas agotado).
+        - No descuentan: un número no encontrado (`404 NO_ENCONTRADO`), un servicio caído
+          (`503 CONSULTA_NO_DISPONIBLE`) ni un dato inválido (`422`).
+        - Al agotarlo: `429` con `codigo: LIMITE_CONSULTAS` y `reintentable: false`; la fecha de
+          renovación viene en `se_renueva`.
+        - Si el plan de tu cuenta **venció**, la consulta responde `402 PLAN_VENCIDO` como el resto
+          del API.
+      parameters:
+        - name: tipo
+          in: path
+          required: true
+          description: Tipo de documento a consultar.
+          schema:
+            type: string
+            enum: [ruc, dni]
+          example: ruc
+        - name: numero
+          in: path
+          required: true
+          description: 'RUC: 11 dígitos con dígito verificador válido. DNI: 8 dígitos.'
+          schema: { type: string, pattern: '^\d{8}(\d{3})?$' }
+          example: "20131312955"
+      responses:
+        '200':
+          description: Datos encontrados.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LookupResponse'
+              examples:
+                ruc:
+                  summary: GET /consultas/ruc/20131312955
+                  value:
+                    success: true
+                    tipo: ruc
+                    numero: "20131312955"
+                    nombre: SUPERINTENDENCIA NACIONAL DE ADUANAS Y DE ADMINISTRACION TRIBUTARIA - SUNAT
+                    direccion: 'AV. GARCILASO DE LA VEGA - Nro: 1472  - LIMA'
+                    estado: null
+                    condicion: null
+                    ubigeo: "150101"
+                    desde_cache: false
+                    consultas_restantes: 29999
+                    periodo: mes
+                    se_renueva: "2026-11-23"
+                rucDesdeCache:
+                  summary: La misma consulta repetida (no descuenta)
+                  value:
+                    success: true
+                    tipo: ruc
+                    numero: "20131312955"
+                    nombre: SUPERINTENDENCIA NACIONAL DE ADUANAS Y DE ADMINISTRACION TRIBUTARIA - SUNAT
+                    direccion: 'AV. GARCILASO DE LA VEGA - Nro: 1472  - LIMA'
+                    estado: null
+                    condicion: null
+                    ubigeo: "150101"
+                    desde_cache: true
+                    consultas_restantes: 29999
+                    periodo: mes
+                    se_renueva: "2026-11-23"
+                dni:
+                  summary: GET /consultas/dni/12345678 (cuenta sin plan)
+                  value:
+                    success: true
+                    tipo: dni
+                    numero: "12345678"
+                    nombre: JUAN CARLOS PEREZ GARCIA
+                    direccion: null
+                    estado: null
+                    condicion: null
+                    ubigeo: null
+                    desde_cache: false
+                    consultas_restantes: 49
+                    periodo: dia
+                    se_renueva: "2026-11-07"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          description: El plan de la cuenta venció (`PLAN_VENCIDO`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                success: false
+                message: El plan de tu cuenta venció. Renuévalo para volver a emitir.
+                codigo: PLAN_VENCIDO
+                reintentable: false
+        '404':
+          description: SUNAT y el proveedor de respaldo no tienen ese número (`NO_ENCONTRADO`). No descuenta del cupo.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                success: false
+                message: No se encontró el RUC en SUNAT.
+                codigo: NO_ENCONTRADO
+                reintentable: false
+        '422':
+          description: |
+            `tipo` distinto de `ruc`/`dni`, DNI que no tiene 8 dígitos o RUC inválido (11 dígitos,
+            prefijo 10/15/17/20 y dígito verificador). `DATOS_INVALIDOS`, detalle en `campos`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ToolValidationError'
+              examples:
+                rucInvalido:
+                  summary: GET /consultas/ruc/20131312954
+                  value:
+                    campos: { numero: ['El RUC no es válido: debe tener 11 dígitos, empezar con 10, 15, 17 o 20 y su dígito verificador debe ser correcto.'] }
+                    success: false
+                    message: 'Datos inválidos: El RUC no es válido: debe tener 11 dígitos, empezar con 10, 15, 17 o 20 y su dígito verificador debe ser correcto.'
+                    codigo: DATOS_INVALIDOS
+                    reintentable: false
+                tipoInvalido:
+                  summary: GET /consultas/ce/001234567
+                  value:
+                    campos: { tipo: ['Solo se puede consultar "ruc" o "dni" (el carné de extranjería no tiene fuente pública).'] }
+                    success: false
+                    message: 'Datos inválidos: Solo se puede consultar "ruc" o "dni" (el carné de extranjería no tiene fuente pública).'
+                    codigo: DATOS_INVALIDOS
+                    reintentable: false
+        '429':
+          description: |
+            Dos casos con el mismo HTTP 429, distínguelos por `codigo`:
+
+            - `LIMITE_CONSULTAS` (**no** reintentable): se acabó el cupo de consultas del periodo.
+              Se renueva en `se_renueva`. Lo ya consultado sigue respondiendo desde caché.
+            - `LIMITE_PETICIONES` (reintentable): superaste 120/min por API key o 60/min por IP.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Error'
+                  - type: object
+                    properties:
+                      retry_after: { type: integer, description: Solo en LIMITE_PETICIONES. }
+                      consultas_restantes: { type: integer, description: Solo en LIMITE_CONSULTAS (siempre 0). }
+                      limite_consultas: { type: integer, description: Solo en LIMITE_CONSULTAS. }
+                      periodo: { type: string, enum: [mes, dia], description: Solo en LIMITE_CONSULTAS. }
+                      se_renueva: { type: string, format: date, description: Solo en LIMITE_CONSULTAS. }
+              examples:
+                limiteConsultasMes:
+                  summary: Cuenta con plan (Business)
+                  value:
+                    consultas_restantes: 0
+                    limite_consultas: 30000
+                    periodo: mes
+                    se_renueva: "2026-11-23"
+                    success: false
+                    message: Llegaste al máximo de 30000 consultas de DNI/RUC de este mes de tu plan. Se renueva el 23/11/2026. Las consultas ya hechas siguen respondiendo desde caché.
+                    codigo: LIMITE_CONSULTAS
+                    reintentable: false
+                limiteConsultasDia:
+                  summary: Cuenta sin plan
+                  value:
+                    consultas_restantes: 0
+                    limite_consultas: 50
+                    periodo: dia
+                    se_renueva: "2026-11-07"
+                    success: false
+                    message: Llegaste al máximo de 50 consultas de DNI/RUC por día (cuenta sin plan). Se renueva el 07/11/2026 (medianoche, hora de Perú). Con un plan activo el cupo es mensual y mayor.
+                    codigo: LIMITE_CONSULTAS
+                    reintentable: false
+        '500':
+          $ref: '#/components/responses/ServerErrorOrRateLimit'
+        '503':
+          description: |
+            Ni SUNAT ni el proveedor de respaldo respondieron (`CONSULTA_NO_DISPONIBLE`, reintentable).
+            No descuenta del cupo.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                success: false
+                message: 'No se pudo consultar ahora: SUNAT y el servicio de respaldo no respondieron o no tienen datos de este número. No se descontó del cupo. Intenta de nuevo en unos minutos.'
+                codigo: CONSULTA_NO_DISPONIBLE
+                reintentable: true
+
 webhooks:
   comprobanteEstado:
     post:
@@ -2065,8 +2457,10 @@ webhooks:
         - Node: `FactuSmart.verificarFirmaWebhook(cuerpoCrudo, firma, secreto)` → `boolean`
         - PHP: `\FactuSmart\Cliente::verificarFirmaWebhook($cuerpoCrudo, $firma, $secreto)` → `bool`
         - Python: `factusmart.verificar_firma_webhook(cuerpo_crudo, firma, secreto)` → `bool`
+        - Java: `FactuSmart.verificarFirmaWebhook(cuerpoCrudo, firma, secreto)` → `boolean`
+        - C#: `FactuSmartClient.VerificarFirmaWebhook(cuerpoCrudo, firma, secreto)` → `bool`
 
-        **Reintentos:** si tu servidor no responde `2xx` en **8 segundos** (error, timeout, conexión
+        **Reintentos:** si tu servidor no responde `2xx` en **5 segundos** (error, timeout, conexión
         rechazada o una redirección `301`/`302`, que no se sigue), se reintenta con espera creciente:
         **6 intentos en total** — inmediato, +1 min, +5 min, +30 min, +2 h y +6 h. Si fallan todos, el
         aviso queda como **Error** en el portal (**Webhooks → Últimas entregas**, 50 más recientes, 30
@@ -2122,7 +2516,7 @@ webhooks:
         '200':
           description: |
             Aviso recibido. Cualquier `2xx` cuenta como entregado; el cuerpo de tu respuesta se ignora.
-            Cualquier otro código (o no responder en 8 s) programa un reintento.
+            Cualquier otro código (o no responder en 5 s) programa un reintento.
 
 components:
   securitySchemes:
@@ -2239,7 +2633,7 @@ components:
             $ref: '#/components/schemas/NoCreditsError'
           example:
             success: false
-            message: Sin créditos disponibles en la cuenta. Recargue para seguir emitiendo.
+            message: Sin créditos disponibles. Sube de plan o pide créditos extra para tu plan.
             codigo: SIN_CREDITOS
             reintentable: false
             creditos_restantes: 0
@@ -2373,6 +2767,8 @@ components:
         - PDF_NO_GENERADO
         - LIMITE_ESTABLECIMIENTOS
         - CATALOGO_NO_DISPONIBLE
+        - LIMITE_CONSULTAS
+        - CONSULTA_NO_DISPONIBLE
     Error:
       type: object
       description: |
@@ -2487,7 +2883,7 @@ components:
         entorno:
           type: string
           enum: [prueba, produccion]
-          description: Entorno en el que se emitió ESTE comprobante.
+          description: Entorno en el que se emitió ESTE comprobante. Un RUC que envía por OSE siempre es `produccion` (el OSE emite real).
         tiene_validez_fiscal:
           type: boolean
         accion_requerida:
@@ -2547,7 +2943,7 @@ components:
           bolsa_vence: { fecha: "2027-07-08", cantidad: 3950 }
           disponibles: 4830
         rucs:
-          - { ruc: "20123456789", nombre: MI EMPRESA S.A.C. }
+          - { ruc: "20100070970", nombre: MI EMPRESA S.A.C. }
     PlanSummary:
       type: object
       properties:
@@ -2560,7 +2956,7 @@ components:
         cupo_usado_mes: { type: integer }
         cupo_restante_mes: { type: integer }
         cupo_se_renueva: { type: [string, "null"], format: date }
-        bolsa: { type: integer, description: 'Créditos de recargas sueltas.' }
+        bolsa: { type: integer, description: 'Créditos extra otorgados para tu plan (no vencen con el mes; vigencia 12 meses).' }
         bolsa_vence:
           type: [object, "null"]
           description: Próximo vencimiento de la bolsa.
@@ -3205,6 +3601,13 @@ components:
           $ref: '#/components/schemas/ParteGuia'
         datos_destinatario:
           $ref: '#/components/schemas/ParteGuia'
+        direcciones_proveedores:
+          type: object
+          description: 'Solo guía del transportista (`31`): dirección del remitente y del destinatario.'
+          required: [remitente, destinatario]
+          properties:
+            remitente: { $ref: '#/components/schemas/DireccionProveedorGuia' }
+            destinatario: { $ref: '#/components/schemas/DireccionProveedorGuia' }
         pagador_flete:
           type: object
           properties:
@@ -3231,6 +3634,12 @@ components:
         ubigeo: { type: string, pattern: '^\d{6}$' }
         direccion: { type: string }
         codigo_del_domicilio_fiscal: { type: string, description: 'Código de establecimiento SUNAT del punto (`-` si no aplica).' }
+    DireccionProveedorGuia:
+      type: object
+      required: [ubigeo, direccion]
+      properties:
+        ubigeo: { type: string, pattern: '^\d{6}$' }
+        direccion: { type: string }
     Chofer:
       type: object
       required: [codigo_tipo_documento_identidad, numero_documento]
@@ -3413,6 +3822,22 @@ components:
                 type: string
                 enum: [segmento, familia, clase, producto]
               categoria: { type: [string, "null"], description: 'Ruta en la jerarquía (segmento > familia > clase).' }
+    LookupResponse:
+      type: object
+      required: [success, tipo, numero, nombre, direccion, estado, condicion, ubigeo, desde_cache, consultas_restantes, periodo, se_renueva]
+      properties:
+        success: { type: boolean, const: true }
+        tipo: { type: string, enum: [ruc, dni] }
+        numero: { type: string, description: El número consultado. }
+        nombre: { type: string, description: 'RUC: razón social. DNI: nombres completos.' }
+        direccion: { type: [string, "null"], description: Domicilio fiscal del RUC. null si la fuente no lo trae (DNI casi siempre). }
+        estado: { type: [string, "null"], description: 'Estado del contribuyente (ej. ACTIVO). null cuando responde SUNAT directo, que no lo trae.' }
+        condicion: { type: [string, "null"], description: 'Condición del domicilio (ej. HABIDO). null cuando responde SUNAT directo, que no lo trae.' }
+        ubigeo: { type: [string, "null"], description: Código INEI del distrito (6 dígitos). }
+        desde_cache: { type: boolean, description: 'true = respondido desde la caché de 30 días; no descontó del cupo.' }
+        consultas_restantes: { type: integer, description: Consultas que te quedan en el periodo actual. }
+        periodo: { type: string, enum: [mes, dia], description: '`mes` = cuenta con plan (cupo por mes del plan); `dia` = cuenta sin plan (50 por día).' }
+        se_renueva: { type: string, format: date, description: Día en que el cupo vuelve a empezar. }
     CatalogRow:
       type: object
       required: [codigo, descripcion, activo]
@@ -3521,13 +3946,13 @@ components:
               entorno:
                 type: [string, "null"]
                 enum: [demo, produccion, null]
-                description: '`demo` = modo prueba (equivale a `entorno: prueba` en los comprobantes). null si el RUC no tiene tenant.'
+                description: '`demo` = modo prueba (equivale a `entorno: prueba` en los comprobantes). Un RUC que envía por OSE es `produccion` aunque esté en prueba. null si el RUC no tiene tenant.'
               activo: { type: boolean }
               creado: { type: [string, "null"], description: 'YYYY-MM-DD HH:MM' }
       example:
         success: true
         rucs:
-          - { ruc: "20609999991", nombre: Mi Cliente SAC, correo: contacto@micliente.pe, entorno: demo, activo: true, creado: "2026-07-08 10:30" }
+          - { ruc: "20609999994", nombre: Mi Cliente SAC, correo: contacto@micliente.pe, entorno: demo, activo: true, creado: "2026-07-08 10:30" }
     CreateRucRequest:
       type: object
       required: [ruc, empresa, correo, clave]
@@ -3550,10 +3975,10 @@ components:
       example:
         success: true
         ya_existia: false
-        ruc: "20609999991"
+        ruc: "20609999994"
         nombre: Mi Cliente SAC
         activo: true
-        tenant_url: https://20609999991.s2.factusmart.pe
+        tenant_url: https://20609999994.s2.factusmart.pe
         mensaje: RUC creado en modo DEMO. Sigue la guía "Pasar a producción" para emitir documentos reales ante SUNAT.
     RucActivationRequest:
       type: object
@@ -3602,7 +4027,7 @@ components:
         entorno:
           type: string
           enum: [prueba, produccion]
-          description: '`prueba` (beta SUNAT, sin validez fiscal) o `produccion`.'
+          description: '`prueba` (beta SUNAT, sin validez fiscal) o `produccion` (también si el RUC envía por OSE).'
         sunat:
           type: object
           description: Lo que respondió SUNAT. Ambos campos pueden ser `null`.

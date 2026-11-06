@@ -286,6 +286,128 @@ namespace FactuSmart.Tests
             Assert.Empty(esperas);
         }
 
+        // ───── Consultas RUC / DNI (lookupDocument) ─────
+
+        private static readonly object ConsultaRuc = new
+        {
+            success = true, tipo = "ruc", numero = "20131312955",
+            nombre = "SUPERINTENDENCIA NACIONAL DE ADUANAS Y DE ADMINISTRACION TRIBUTARIA - SUNAT",
+            direccion = "AV. GARCILASO DE LA VEGA - Nro: 1472  - LIMA",
+            estado = (string?)null, condicion = (string?)null, ubigeo = "150101",
+            desde_cache = false, consultas_restantes = 29999, periodo = "mes", se_renueva = "2026-11-23",
+        };
+
+        [Fact]
+        public async Task ConsultarRuc_hace_GET_sin_ruc_y_parsea_la_respuesta()
+        {
+            var (c, m, _) = Cliente(R(200, ConsultaRuc));
+            var r = await c.ConsultarRucAsync(" 20131312955 ");
+            var l = Assert.Single(m.Llamadas);
+            Assert.Equal("GET", l.Metodo);
+            Assert.Equal(Base + "/consultas/ruc/20131312955", l.Url.ToString());
+            Assert.Equal("", l.Url.Query);
+            Assert.False(l.Cabeceras.ContainsKey("X-RUC"));
+            Assert.Null(l.Cuerpo);
+            Assert.Equal("k_prueba", l.Cabeceras["X-API-Key"]);
+            Assert.True(r.Success);
+            Assert.Equal("ruc", r.Tipo);
+            Assert.Equal("20131312955", r.Numero);
+            Assert.StartsWith("SUPERINTENDENCIA", r.Nombre);
+            Assert.Equal("AV. GARCILASO DE LA VEGA - Nro: 1472  - LIMA", r.Direccion);
+            Assert.Null(r.Estado);
+            Assert.Null(r.Condicion);
+            Assert.Equal("150101", r.Ubigeo);
+            Assert.False(r.DesdeCache);
+            Assert.Equal(29999, r.ConsultasRestantes);
+            Assert.Equal("mes", r.Periodo);
+            Assert.Equal("2026-11-23", r.SeRenueva);
+            Assert.Equal("ruc", r.Respuesta.Str("tipo"));
+        }
+
+        [Fact]
+        public async Task ConsultarDni_y_generico_arman_la_URL_y_aceptan_nulls()
+        {
+            var dni = new
+            {
+                success = true, tipo = "dni", numero = "12345678", nombre = "JUAN CARLOS PEREZ GARCIA",
+                direccion = (string?)null, estado = (string?)null, condicion = (string?)null, ubigeo = (string?)null,
+                desde_cache = true, consultas_restantes = 49, periodo = "dia", se_renueva = "2026-11-07",
+            };
+            var (c, m, _) = Cliente(R(200, dni), R(200, dni));
+            var r = await c.ConsultarDniAsync("12345678");
+            await c.ConsultarDocumentoAsync("DNI", "12345678");
+            Assert.All(m.Llamadas, l => Assert.Equal(Base + "/consultas/dni/12345678", l.Url.ToString()));
+            Assert.Null(r.Direccion);
+            Assert.Null(r.Ubigeo);
+            Assert.True(r.DesdeCache);
+            Assert.Equal("dia", r.Periodo);
+        }
+
+        [Fact]
+        public async Task ConsultarDocumento_tipo_invalido_o_numero_vacio_falla_sin_peticion()
+        {
+            var (c, m, _) = Cliente(R(200, ConsultaRuc));
+            await Assert.ThrowsAsync<FactuSmartException>(() => c.ConsultarDocumentoAsync("ce", "001234567"));
+            await Assert.ThrowsAsync<FactuSmartException>(() => c.ConsultarRucAsync(" "));
+            Assert.Empty(m.Llamadas);
+        }
+
+        [Fact]
+        public async Task Consulta_429_LIMITE_CONSULTAS_no_se_reintenta()
+        {
+            var (c, m, esperas) = Cliente(R(429, new
+            {
+                success = false, message = "Se acabó tu cupo de consultas.", codigo = "LIMITE_CONSULTAS", reintentable = false,
+                consultas_restantes = 0, limite_consultas = 60000, periodo = "mes", se_renueva = "2026-11-23",
+            }), R(200, ConsultaRuc));
+            var e = await Assert.ThrowsAsync<LimiteDePeticiones>(() => c.ConsultarRucAsync("20131312955"));
+            Assert.Equal("LIMITE_CONSULTAS", e.Codigo);
+            Assert.False(e.Reintentable);
+            Assert.Equal("2026-11-23", e.Respuesta!.Value.Str("se_renueva"));
+            Assert.Single(m.Llamadas);
+            Assert.Empty(esperas);
+        }
+
+        [Fact]
+        public async Task Consulta_429_LIMITE_PETICIONES_y_503_CONSULTA_NO_DISPONIBLE_se_reintentan()
+        {
+            var (c, m, _) = Cliente(
+                R(429, new { success = false, codigo = "LIMITE_PETICIONES", reintentable = true, retry_after = 1 }),
+                R(503, new { success = false, codigo = "CONSULTA_NO_DISPONIBLE", reintentable = true }),
+                R(200, ConsultaRuc));
+            var r = await c.ConsultarRucAsync("20131312955");
+            Assert.Equal(3, m.Llamadas.Count);
+            Assert.Equal("20131312955", r.Numero);
+        }
+
+        [Fact]
+        public async Task Consulta_404_y_422_lanzan_su_excepcion_sin_reintentar()
+        {
+            var (c, m, _) = Cliente(R(404, new { success = false, message = "No se encontró el RUC en SUNAT.", codigo = "NO_ENCONTRADO", reintentable = false }));
+            var e = await Assert.ThrowsAsync<NoEncontrado>(() => c.ConsultarRucAsync("20131312955"));
+            Assert.Equal("NO_ENCONTRADO", e.Codigo);
+            Assert.Single(m.Llamadas);
+
+            var (c2, m2, _) = Cliente(R(422, new
+            {
+                success = false, message = "Datos inválidos: El RUC no es válido.", codigo = "DATOS_INVALIDOS", reintentable = false,
+                campos = new { numero = new[] { "El RUC no es válido." } },
+            }));
+            var e2 = await Assert.ThrowsAsync<ErrorDeValidacion>(() => c2.ConsultarRucAsync("20131312954"));
+            Assert.Equal("DATOS_INVALIDOS", e2.Codigo);
+            Assert.True(e2.Campos.ContainsKey("numero"));
+            Assert.Single(m2.Llamadas);
+        }
+
+        [Fact]
+        public async Task Raiz_hace_GET_a_la_base_sin_ruc()
+        {
+            var (c, m, _) = Cliente(R(200, new { success = true, api = "FactuSmart", docs = "https://x", estado = "ok" }));
+            var r = await c.RaizAsync();
+            Assert.Equal(Base + "/", Assert.Single(m.Llamadas).Url.ToString());
+            Assert.Equal("ok", r.Str("estado"));
+        }
+
         [Fact]
         public async Task Reintentable_false_manda_aunque_el_HTTP_sea_503()
         {

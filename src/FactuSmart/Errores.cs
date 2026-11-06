@@ -20,6 +20,7 @@ namespace FactuSmart
             "RUC_SIN_TENANT", "CERTIFICADO_NO_CONFIGURADO", "ERROR_EMISION", "RECHAZADO_SUNAT",
             "REENVIO_FALLIDO", "SUNAT_NO_DISPONIBLE", "LIMITE_PETICIONES", "LIMITE_PRUEBAS_DIARIO",
             "ANULACION_MIXTA", "ERROR_INTERNO", "PDF_NO_GENERADO", "LIMITE_ESTABLECIMIENTOS", "CATALOGO_NO_DISPONIBLE",
+            "LIMITE_CONSULTAS", "CONSULTA_NO_DISPONIBLE",
         };
 
         private static readonly IReadOnlyDictionary<string, string[]> SinCampos = new Dictionary<string, string[]>();
@@ -133,7 +134,8 @@ namespace FactuSmart
     /// <summary>
     /// Límite superado (HTTP 429). Distingue por <see cref="FactuSmartException.Codigo"/>:
     /// <c>LIMITE_PETICIONES</c> (por minuto, el SDK reintenta) o <c>LIMITE_PRUEBAS_DIARIO</c>
-    /// (tope de 200 operaciones/día en RUCs demo; NO se reintenta, se reinicia a medianoche de Lima).
+    /// (tope de 200 operaciones/día en RUCs demo; NO se reintenta, se reinicia a medianoche de Lima) o
+    /// <c>LIMITE_CONSULTAS</c> (cupo de consultas RUC/DNI agotado; NO se reintenta, se renueva en <c>se_renueva</c>).
     /// </summary>
     public class LimiteDePeticiones : FactuSmartException
     {

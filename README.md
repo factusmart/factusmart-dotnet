@@ -88,12 +88,14 @@ y reúsalo (por ejemplo como singleton): es seguro usarlo desde varios hilos.
 
 ## Métodos
 
-Todos devuelven `Task<JsonElement>` (salvo `DescargarAsync`) y aceptan un `CancellationToken` al final.
+Todos devuelven `Task<JsonElement>` (salvo `DescargarAsync` y las consultas RUC/DNI) y aceptan un `CancellationToken` al final.
 `opciones` acepta `Ruc` (sobreescribe el del cliente) y, en `EmitirAsync`, `IdempotencyKey`.
 
 | Método | Endpoint | Devuelve |
 |---|---|---|
 | `fs.PingAsync(opciones?)` | `GET /ping` | objeto |
+| `fs.RaizAsync()` | `GET /` | objeto (`estado: "ok"`, `docs`) |
+| `fs.ConsultarRucAsync(numero)` / `fs.ConsultarDniAsync(numero)` / `fs.ConsultarDocumentoAsync("ruc" \| "dni", numero)` | `GET /consultas/{tipo}/{numero}` | **`ConsultaDocumento`** |
 | `fs.Cuenta.SaldoAsync()` | `GET /account` | objeto (`creditos_disponibles`, plan, RUCs) |
 | `fs.Series.ListarAsync(opciones?)` | `GET /series` | objeto |
 | `fs.Comprobantes.EmitirAsync(datos, opciones?)` | `POST /documents` | objeto |
@@ -203,6 +205,18 @@ var nuevo = await fs.Establecimientos.CrearAsync(new {
   `RucNoAutorizado` con `Codigo` `LIMITE_ESTABLECIMIENTOS`. No consumen crédito.
 - Editar o eliminar un local se hace desde el sistema web.
 
+### Consultar RUC o DNI
+
+```csharp
+var c = await fs.ConsultarRucAsync("20131312955"); // o fs.ConsultarDniAsync("12345678")
+Console.WriteLine($"{c.Nombre} | {c.Direccion} | quedan {c.ConsultasRestantes} hasta {c.SeRenueva}");
+```
+
+- No emite, no gasta créditos y **no manda RUC emisor**. Repetir un número (30 días) responde con
+  `DesdeCache = true` y no descuenta del cupo. `Estado`, `Condicion`, `Direccion` y `Ubigeo` pueden venir en null.
+- Cupo agotado: `LimiteDePeticiones` con `Codigo` `LIMITE_CONSULTAS`, **sin reintentos**. No encontrado:
+  `NoEncontrado`; número inválido: `ErrorDeValidacion`; `503 CONSULTA_NO_DISPONIBLE` se reintenta.
+
 ## ¿Calcular en el servidor o local?
 
 | | `fs.Comprobantes.CalcularAsync(items, opciones?)` | `FactuSmartClient.CalcularComprobante(items)` |
@@ -295,6 +309,8 @@ Códigos más comunes (lista en `FactuSmartException.CodigosDeError`; el API pue
 | `SUNAT_NO_DISPONIBLE` | SUNAT no responde (reintentable) |
 | `LIMITE_PETICIONES` | Demasiadas peticiones por minuto (reintentable) |
 | `LIMITE_PRUEBAS_DIARIO` | 429 **no reintentable**: tope de 200 operaciones/día en RUCs demo |
+| `LIMITE_CONSULTAS` | 429 **no reintentable**: cupo de consultas RUC/DNI agotado (se renueva en `se_renueva`) |
+| `CONSULTA_NO_DISPONIBLE` | 503: SUNAT y el respaldo no responden (reintentable) |
 | `ANULACION_MIXTA` | Facturas y boletas en la misma anulación (422) |
 | `LLAVE_DE_PRUEBA_EN_PRODUCCION` | Llave de prueba usada con un RUC en producción (403) |
 | `ERROR_INTERNO` | Error del servidor |

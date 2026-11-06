@@ -21,7 +21,7 @@ namespace FactuSmart
     /// </summary>
     public sealed class FactuSmartClient : IDisposable
     {
-        public const string Version = "0.1.0";
+        public const string Version = "0.2.0";
 
         private static readonly TimeSpan EsperaMaxima = TimeSpan.FromSeconds(60);
         private static readonly Regex FirmaHex = new Regex("^[0-9a-f]{64}$", RegexOptions.CultureInvariant);
@@ -167,6 +167,44 @@ namespace FactuSmart
         /// <summary>GET /ping — prueba la API key. No consume crédito.</summary>
         public Task<JsonElement> PingAsync(OpcionesRuc? opciones = null, CancellationToken cancellationToken = default)
             => JsonAsync(new Peticion("GET", "/ping") { Query = { ["ruc"] = RucDe(opciones) }, Reintentable = true }, cancellationToken);
+
+        /// <summary>GET / — raíz del API: confirma que el servicio responde (<c>estado: "ok"</c>) y dónde están los docs. No necesita RUC.</summary>
+        public Task<JsonElement> RaizAsync(CancellationToken cancellationToken = default)
+            => JsonAsync(new Peticion("GET", "/") { Reintentable = true }, cancellationToken);
+
+        /// <summary>
+        /// GET /consultas/ruc/{numero} — razón social, dirección, estado, condición y ubigeo de un RUC.
+        /// No emite, no gasta créditos y no manda RUC emisor. Descuenta del cupo de consultas (salvo
+        /// <c>DesdeCache</c>). Cupo agotado → <see cref="LimiteDePeticiones"/> con <c>Codigo</c>
+        /// <c>LIMITE_CONSULTAS</c> (no se reintenta).
+        /// </summary>
+        public Task<ConsultaDocumento> ConsultarRucAsync(string numero, CancellationToken cancellationToken = default)
+            => ConsultarDocumentoAsync("ruc", numero, cancellationToken);
+
+        /// <summary>GET /consultas/dni/{numero} — nombres completos de un DNI (8 dígitos). Igual que <see cref="ConsultarRucAsync"/>.</summary>
+        public Task<ConsultaDocumento> ConsultarDniAsync(string numero, CancellationToken cancellationToken = default)
+            => ConsultarDocumentoAsync("dni", numero, cancellationToken);
+
+        /// <summary>
+        /// GET /consultas/{tipo}/{numero} — <paramref name="tipo"/> = <c>ruc</c> o <c>dni</c>. Errores: 422
+        /// <c>DATOS_INVALIDOS</c>, 404 <c>NO_ENCONTRADO</c>, 429 <c>LIMITE_CONSULTAS</c> (no reintentable) o
+        /// <c>LIMITE_PETICIONES</c> (se reintenta), 503 <c>CONSULTA_NO_DISPONIBLE</c> (se reintenta).
+        /// </summary>
+        public async Task<ConsultaDocumento> ConsultarDocumentoAsync(string tipo, string numero, CancellationToken cancellationToken = default)
+        {
+            var t = (tipo ?? "").Trim().ToLowerInvariant();
+            if (t != "ruc" && t != "dni")
+                throw new FactuSmartException($"Tipo de documento inválido \"{tipo}\": usa \"ruc\" o \"dni\".");
+            if (string.IsNullOrWhiteSpace(numero))
+                throw new FactuSmartException($"Falta el número de {t.ToUpperInvariant()} a consultar.");
+            // Sin `ruc` (ni query ni header): esta operación no necesita RUC emisor.
+            var p = new Peticion("GET", $"/consultas/{t}/{Uri.EscapeDataString(numero.Trim())}") { Reintentable = true };
+            var json = await JsonAsync(p, cancellationToken).ConfigureAwait(false);
+            var resultado = JsonSerializer.Deserialize<ConsultaDocumento>(json.GetRawText())
+                ?? throw new FactuSmartException("El API respondió una consulta vacía.", 200, json);
+            resultado.Respuesta = json;
+            return resultado;
+        }
 
         // ───────────── Internos ─────────────
 
