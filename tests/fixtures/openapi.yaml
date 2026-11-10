@@ -291,6 +291,8 @@ tags:
     description: Saldo de créditos, plan y series.
   - name: RUCs
     description: Alta, listado y activación/desactivación de los RUCs de la cuenta.
+  - name: Configuración del RUC
+    description: Certificado digital, usuario/clave SOL y entorno (prueba/producción) de cada RUC, sin entrar al panel. No consumen crédito.
   - name: Anexos
     description: Locales (establecimientos / anexos SUNAT) de un RUC, cada uno con sus series. No consumen crédito.
   - name: Comprobantes
@@ -824,6 +826,11 @@ paths:
         Descarga el PDF (formato A4, se regenera en cada descarga), el XML firmado o el CDR (ZIP de
         SUNAT) del comprobante. No consume crédito. El PDF y el XML existen desde que el comprobante
         se genera (incluso en estado `01`); el CDR solo cuando SUNAT respondió.
+
+        **`{external_id}`** es el código único del comprobante que devuelve `POST /documents` al
+        emitir (campo `external_id`, p. ej. `9822f52c-108e-47ff-9d2e-5f0c3c1a7b11`). Guárdalo con tu
+        venta; si no lo tienes, `GET /documents` lista tus comprobantes con su `external_id`.
+
         Si el comprobante o el archivo (PDF, XML o CDR) no existen, responde `404` JSON con
         `codigo: NO_ENCONTRADO` (si falta el CDR, consulta a SUNAT con `/consultar-sunat` y reintenta).
 
@@ -1633,6 +1640,225 @@ paths:
               example: { success: false, message: 'Ese RUC no pertenece a esta cuenta o no existe.', codigo: NO_ENCONTRADO, reintentable: false }
         '422':
           $ref: '#/components/responses/LaravelValidation'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/ServerErrorOrRateLimit'
+
+  /rucs/{ruc}/certificado:
+    put:
+      operationId: uploadRucCertificate
+      tags: [Configuración del RUC]
+      summary: Instalar el certificado digital
+      description: |
+        Instala el certificado digital (.pfx / .p12) del RUC, igual que la pantalla «Certificado» del
+        panel. Antes de instalarlo comprueba que **abre con la clave**, que **está vigente** y que **es de
+        este RUC** (el RUC se busca en el titular del certificado: `serialNumber`, `OU`, `CN`…). Si el
+        titular no trae RUC (p. ej. persona natural con DNI) se instala igual y la respuesta trae
+        `ruc_coincide: null` y un `aviso`. Reemplaza al certificado anterior. No consume crédito.
+
+        Dos formas de enviarlo:
+        - **JSON**: `certificado` = contenido del .pfx en **base64** (se acepta también con prefijo `data:…;base64,`).
+        - **multipart/form-data**: archivo en el campo `certificado`. Como PHP no lee archivos en un
+          `PUT`, envíalo con **`POST`** a la misma URL y el campo `_method=PUT`.
+
+        La llave de **prueba** (`fs_test_…`) no puede instalar certificados (`403 SIN_PERMISO`).
+        Nunca se devuelve la clave ni el contenido del certificado.
+      parameters:
+        - $ref: '#/components/parameters/RucPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UploadCertificateRequest'
+            example: { certificado: 'MIIKXgIBAzCCCiQGCSqGSIb3DQEHAaCCChUEggoRMIIKDTCCBG...', clave: 'ClaveDelPfx' }
+          multipart/form-data:
+            schema:
+              type: object
+              required: [certificado, clave]
+              properties:
+                certificado: { type: string, format: binary, description: 'Archivo .pfx / .p12 (máx. 5 MB).' }
+                clave: { type: string }
+                _method: { type: string, const: PUT, description: 'Solo si envías con POST (multipart).' }
+      responses:
+        '200':
+          description: Certificado instalado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadCertificateResponse'
+              examples:
+                rucCoincide:
+                  summary: El titular trae el RUC y coincide
+                  value: { success: true, ruc: '20777666555', certificado: { instalado: true, titular: API TENANT CLEAN SAC, vence: '2027-11-10', dias_para_vencer: 364, ruc_coincide: true } }
+                sinRucEnTitular:
+                  summary: El titular no trae RUC (se instala con aviso)
+                  value: { success: true, ruc: '20777666555', certificado: { instalado: true, titular: JUAN PEREZ, vence: '2027-11-10', dias_para_vencer: 364, ruc_coincide: null }, aviso: 'No se encontró un RUC en el titular del certificado, así que no se pudo comprobar que sea de 20777666555. Verifícalo con POST /rucs/20777666555/verificar.' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/TestKeyCannotConfigure'
+        '404':
+          $ref: '#/components/responses/RucNotInAccount'
+        '422':
+          description: Clave incorrecta, certificado vencido, de otro RUC, base64 inválido o formato no soportado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+              examples:
+                claveIncorrecta:
+                  value: { success: false, message: 'El certificado no abre con esa clave (o el archivo no es un .pfx/.p12). Revisa la clave.', codigo: DATOS_INVALIDOS, reintentable: false, campos: { clave: ['El certificado no abre con esa clave (o el archivo no es un .pfx/.p12). Revisa la clave.'] } }
+                vencido:
+                  value: { success: false, message: 'El certificado venció el 2024-12-31. Necesitas uno vigente.', codigo: DATOS_INVALIDOS, reintentable: false, campos: { certificado: ['El certificado venció el 2024-12-31. Necesitas uno vigente.'] } }
+                otroRuc:
+                  value: { success: false, message: 'El certificado es de otro RUC (20100070970), no de 20777666555.', codigo: DATOS_INVALIDOS, reintentable: false, campos: { certificado: ['El certificado es de otro RUC (20100070970), no de 20777666555.'] } }
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/ServerErrorOrRateLimit'
+
+  /rucs/{ruc}/sunat:
+    put:
+      operationId: updateRucSunat
+      tags: [Configuración del RUC]
+      summary: Usuario/clave SOL y entorno
+      description: |
+        Guarda el **usuario secundario SOL** y su clave, y/o cambia el **entorno** del RUC
+        (`prueba` = beta de SUNAT, sin validez fiscal · `produccion` = comprobantes reales).
+
+        - `usuario_sol`: solo el usuario secundario (`FACTURA1`). Si lo mandas con el RUC delante
+          (`20777666555FACTURA1`) se limpia. Se guarda en mayúsculas. `usuario_sol` y `clave_sol` van juntos.
+        - `entorno` (opcional): para pasar a `produccion` el RUC debe tener **certificado vigente** y
+          **usuario/clave SOL** (los de este mismo pedido cuentan). Si falta algo → `422` con `faltantes`
+          y no se guarda nada. Solo cambia el entorno: si el RUC envía por OSE o PSE, eso se respeta.
+          Un RUC que envía por OSE no se puede poner en `prueba` por API.
+        - No llama a SUNAT. Para comprobar que el usuario SOL es correcto usa `POST /rucs/{ruc}/verificar`.
+
+        La llave de **prueba** no puede cambiar SOL ni entorno (`403 SIN_PERMISO`). Responde el mismo
+        resumen que `GET /rucs/{ruc}/configuracion` (sin claves). Queda registrado en la bitácora de
+        acciones críticas (qué cambió, nunca la clave).
+      parameters:
+        - $ref: '#/components/parameters/RucPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateSunatRequest'
+            examples:
+              guardarSol:
+                value: { usuario_sol: FACTURA1, clave_sol: 'ClaveSol9' }
+              pasarAProduccion:
+                value: { entorno: produccion }
+              todoJunto:
+                value: { usuario_sol: '20777666555FACTURA1', clave_sol: 'ClaveSol9', entorno: produccion }
+      responses:
+        '200':
+          description: Guardado. Devuelve la configuración resultante.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RucConfigResponse'
+              example: { success: true, ruc: '20777666555', nombre: API TENANT CLEAN SAC, entorno: produccion, certificado: { instalado: true, vence: '2027-11-10', dias_para_vencer: 364 }, sol: { configurado: true, usuario: 'FA*****1' }, envio: sunat, listo_para_produccion: true, faltantes: [], aviso: 'Este RUC tiene 147 comprobante(s) de prueba. No tienen validez fiscal; puedes borrarlos desde tu portal de integrador.' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/TestKeyCannotConfigure'
+        '404':
+          $ref: '#/components/responses/RucNotInAccount'
+        '422':
+          description: Datos inválidos o falta algo para pasar a producción.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+              examples:
+                faltaParaProduccion:
+                  value: { success: false, message: 'Para pasar a producción falta: sol. Instala el certificado (PUT /rucs/20777666555/certificado) y el usuario/clave SOL. No se guardó ningún cambio.', codigo: DATOS_INVALIDOS, reintentable: false, campos: { entorno: ['Falta: sol'] }, faltantes: [sol] }
+                usuarioInvalido:
+                  value: { success: false, message: 'usuario_sol debe ser el usuario secundario SOL (solo letras y números, sin espacios), con o sin el RUC delante.', codigo: DATOS_INVALIDOS, reintentable: false, campos: { usuario_sol: ['usuario_sol debe ser el usuario secundario SOL (solo letras y números, sin espacios), con o sin el RUC delante.'] } }
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/ServerErrorOrRateLimit'
+
+  /rucs/{ruc}/verificar:
+    post:
+      operationId: verifyRucConfig
+      tags: [Configuración del RUC]
+      summary: Verificar certificado y SOL contra SUNAT
+      description: |
+        Prueba real, **sin emitir nada**: revisa que el certificado instalado exista, se pueda leer, tenga
+        su clave privada, esté vigente y sea de este RUC; y prueba el usuario/clave SOL contra **SUNAT
+        producción** con una consulta inofensiva (estado de un comprobante que no existe, en el servicio
+        de consulta de CDR). Si SUNAT responde «no autorizado», el SOL es inválido (`sol.ok: false`).
+
+        - En **prueba** el sistema emite a la beta de SUNAT con el usuario `MODDATOS`, que acepta
+          cualquier dato: ahí `sol.ok` es `null` (la verificación real solo aplica en producción) y
+          `listo_para_emitir` es `true`.
+        - Si el RUC envía por OSE/PSE, el SOL se valida con ese proveedor: `sol.ok: null`.
+        - Si SUNAT no responde: `sol.ok: null` con el motivo (no es un error 500). Reintenta luego.
+
+        Se puede usar con la llave de prueba. No consume crédito.
+      parameters:
+        - $ref: '#/components/parameters/RucPath'
+      responses:
+        '200':
+          description: Resultado de la verificación.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerifyRucConfigResponse'
+              examples:
+                produccionSolInvalido:
+                  summary: Producción, SUNAT rechazó el SOL
+                  value: { success: true, ruc: '20777666555', listo_para_emitir: false, entorno: produccion, checks: { certificado: { ok: true, mensaje: 'Certificado vigente hasta el 2027-11-10 (364 días).' }, sol: { ok: false, mensaje: 'SUNAT rechazó el usuario o la clave SOL (usuario o contraseña incorrectos, o usuario inactivo).' } } }
+                prueba:
+                  summary: En prueba (beta de SUNAT)
+                  value: { success: true, ruc: '20777666555', listo_para_emitir: true, entorno: prueba, checks: { certificado: { ok: true, mensaje: 'Certificado vigente hasta el 2027-11-10 (364 días).' }, sol: { ok: null, mensaje: 'En prueba se emite a la beta de SUNAT con el usuario MODDATOS, que acepta cualquier dato: la verificación real del usuario SOL solo se hace en producción. Tu usuario SOL ya está guardado.' } } }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/RucNotInAccount'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/ServerErrorOrRateLimit'
+
+  /rucs/{ruc}/configuracion:
+    get:
+      operationId: getRucConfig
+      tags: [Configuración del RUC]
+      summary: Ver la configuración del RUC
+      description: |
+        Resumen de la configuración SUNAT del RUC, **sin llamar a SUNAT**: entorno, certificado
+        (vencimiento), si tiene usuario SOL (enmascarado), canal de envío y qué falta para producción.
+        Nunca devuelve claves. Se puede usar con la llave de prueba. No consume crédito.
+
+        `faltantes` puede traer: `certificado`, `certificado_vencido`, `certificado_sin_clave_privada`, `sol`.
+        Con PSE el certificado propio no se exige.
+      parameters:
+        - $ref: '#/components/parameters/RucPath'
+      responses:
+        '200':
+          description: Configuración actual.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RucConfigResponse'
+              examples:
+                recienCreado:
+                  summary: RUC recién creado (prueba, sin certificado ni SOL)
+                  value: { success: true, ruc: '20777666555', nombre: API TENANT CLEAN SAC, entorno: prueba, certificado: { instalado: false, vence: null, dias_para_vencer: null }, sol: { configurado: false, usuario: MODDATOS }, envio: sunat, listo_para_produccion: false, faltantes: [certificado, sol] }
+                enProduccion:
+                  summary: En producción, todo configurado
+                  value: { success: true, ruc: '20777666555', nombre: API TENANT CLEAN SAC, entorno: produccion, certificado: { instalado: true, vence: '2027-11-10', dias_para_vencer: 364 }, sol: { configurado: true, usuario: 'FA*****1' }, envio: sunat, listo_para_produccion: true, faltantes: [] }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/RucNotInAccount'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':
@@ -2534,6 +2760,12 @@ components:
       description: Alternativa aceptada por el middleware, `Authorization Bearer` con la misma API key. Solo se usa si no hay `X-API-Key`.
 
   parameters:
+    RucPath:
+      name: ruc
+      in: path
+      required: true
+      description: RUC de 11 dígitos enlazado a tu cuenta. Es el único que cuenta (se ignoran `X-RUC` y `ruc` del cuerpo).
+      schema: { type: string, pattern: '^\d{11}$' }
     RucQuery:
       name: ruc
       in: query
@@ -2604,6 +2836,20 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
           example: { success: false, message: 'Estás usando tu llave de PRUEBA y este RUC está en producción. La llave de prueba solo emite, anula y reenvía en RUCs en modo demo. Usa tu llave de producción.', codigo: LLAVE_DE_PRUEBA_EN_PRODUCCION, reintentable: false }
+    TestKeyCannotConfigure:
+      description: La llave de prueba (`fs_test_…`) no puede cambiar certificado, SOL ni entorno.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: { success: false, message: 'Tu llave de PRUEBA no puede cambiar el certificado, el usuario SOL ni el entorno de un RUC. Usa tu llave de producción. (Con la de prueba sí puedes consultar GET /rucs/{ruc}/configuracion y POST /rucs/{ruc}/verificar.)', codigo: SIN_PERMISO, reintentable: false }
+    RucNotInAccount:
+      description: El RUC no pertenece a tu cuenta o no existe (misma respuesta en los dos casos).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example: { success: false, message: 'Ese RUC no pertenece a esta cuenta o no existe.', codigo: NO_ENCONTRADO, reintentable: false }
     RucWithoutTenant:
       description: El RUC resuelto no tiene tenant asociado.
       content:
@@ -3993,6 +4239,90 @@ components:
         ruc: { type: string }
         activo: { type: boolean }
         mensaje: { type: string }
+
+    # ───────────── Configuración del RUC ─────────────
+    UploadCertificateRequest:
+      type: object
+      required: [certificado, clave]
+      properties:
+        certificado: { type: string, description: 'Contenido del .pfx / .p12 en base64 (máx. 5 MB).' }
+        clave: { type: string, description: 'Clave del certificado. No se guarda ni se devuelve.' }
+    UploadCertificateResponse:
+      type: object
+      required: [success, ruc, certificado]
+      properties:
+        success: { type: boolean, const: true }
+        ruc: { type: string }
+        certificado:
+          type: object
+          required: [instalado, titular, vence, dias_para_vencer, ruc_coincide]
+          properties:
+            instalado: { type: boolean, const: true }
+            titular: { type: [string, 'null'], description: 'CN (u O) del titular del certificado.' }
+            vence: { type: string, format: date }
+            dias_para_vencer: { type: integer }
+            ruc_coincide:
+              type: [boolean, 'null']
+              description: '`true` si el RUC del titular es el del path; `null` si el titular no trae RUC (no se pudo comprobar).'
+        aviso: { type: string, description: 'Solo si `ruc_coincide` es `null`.' }
+    UpdateSunatRequest:
+      type: object
+      description: 'Envía `usuario_sol` + `clave_sol`, o `entorno`, o los tres.'
+      properties:
+        usuario_sol: { type: string, maxLength: 40, description: 'Usuario secundario SOL, con o sin el RUC delante.' }
+        clave_sol: { type: string, maxLength: 100 }
+        entorno: { type: string, enum: [prueba, produccion], description: '`demo` se acepta como sinónimo de `prueba`.' }
+    RucConfigResponse:
+      type: object
+      required: [success, ruc, nombre, entorno, certificado, sol, envio, listo_para_produccion, faltantes]
+      properties:
+        success: { type: boolean, const: true }
+        ruc: { type: string }
+        nombre: { type: [string, 'null'] }
+        entorno: { type: string, enum: [prueba, produccion] }
+        certificado:
+          type: object
+          required: [instalado, vence, dias_para_vencer]
+          properties:
+            instalado: { type: boolean, description: 'Hay un certificado instalado que se puede leer.' }
+            vence: { type: [string, 'null'], format: date }
+            dias_para_vencer: { type: [integer, 'null'], description: 'Negativo si ya venció.' }
+        sol:
+          type: object
+          required: [configurado, usuario]
+          properties:
+            configurado: { type: boolean, description: 'Hay usuario secundario y clave SOL propios (MODDATOS no cuenta).' }
+            usuario:
+              type: [string, 'null']
+              description: 'Usuario secundario enmascarado (`FA*****1`); `MODDATOS` en prueba si no hay uno propio; `null` en producción sin SOL.'
+        envio: { type: string, enum: [sunat, ose, pse], description: 'Por dónde se envían los comprobantes.' }
+        listo_para_produccion: { type: boolean }
+        faltantes:
+          type: array
+          items: { type: string, enum: [certificado, certificado_vencido, certificado_sin_clave_privada, sol] }
+        aviso: { type: string, description: 'Solo en PUT /sunat al pasar a producción si quedan comprobantes de prueba.' }
+    ConfigCheck:
+      type: object
+      required: [ok, mensaje]
+      properties:
+        ok:
+          type: [boolean, 'null']
+          description: '`true` correcto · `false` hay un problema · `null` no se pudo comprobar o no aplica.'
+        mensaje: { type: string }
+    VerifyRucConfigResponse:
+      type: object
+      required: [success, ruc, listo_para_emitir, entorno, checks]
+      properties:
+        success: { type: boolean, const: true }
+        ruc: { type: string }
+        listo_para_emitir: { type: boolean }
+        entorno: { type: string, enum: [prueba, produccion] }
+        checks:
+          type: object
+          required: [certificado, sol]
+          properties:
+            certificado: { $ref: '#/components/schemas/ConfigCheck' }
+            sol: { $ref: '#/components/schemas/ConfigCheck' }
 
     # ───────────── Webhooks ─────────────
     WebhookEvento:

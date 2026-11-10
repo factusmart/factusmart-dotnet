@@ -750,5 +750,207 @@ namespace FactuSmart.Tests
             Assert.Contains("ticket58", e.Mensaje);
             Assert.Empty(m.Llamadas);
         }
+
+        // ───── Configuración del RUC ─────
+
+        private static readonly object CertificadoOk = new
+        {
+            success = true, ruc = "20777666555",
+            certificado = new { instalado = true, titular = "API TENANT CLEAN SAC", vence = "2027-11-10", dias_para_vencer = 364, ruc_coincide = true },
+        };
+
+        private static readonly object ConfigOk = new
+        {
+            success = true, ruc = "20777666555", nombre = "API TENANT CLEAN SAC", entorno = "produccion",
+            certificado = new { instalado = true, vence = "2027-11-10", dias_para_vencer = 364 },
+            sol = new { configurado = true, usuario = "FA*****1" },
+            envio = "sunat", listo_para_produccion = true, faltantes = new string[0],
+        };
+
+        [Fact]
+        public async Task SubirCertificado_desde_archivo_manda_PUT_con_base64_sin_ruc_emisor()
+        {
+            var contenido = new byte[] { 0x30, 0x82, 0x0A, 0x5E, 0x02, 0x01, 0x03, 0xFF, 0x00, 0x10 };
+            var ruta = Path.Combine(Path.GetTempPath(), "fs-cert-" + Guid.NewGuid().ToString("N") + ".pfx");
+            File.WriteAllBytes(ruta, contenido);
+            try
+            {
+                var (c, m, _) = Cliente(R(200, CertificadoOk));
+                var r = await c.Rucs.SubirCertificadoAsync("20777666555", ruta, "ClaveDelPfx");
+                var l = m.Llamadas.Single();
+                Assert.Equal("PUT", l.Metodo);
+                Assert.Equal(Base + "/rucs/20777666555/certificado", l.Url.ToString());
+                Assert.Equal(Convert.ToBase64String(contenido), l.Cuerpo!.Value.Str("certificado"));
+                Assert.Equal("ClaveDelPfx", l.Cuerpo!.Value.Str("clave"));
+                Assert.False(l.Cuerpo!.Value.TryGetProperty("ruc", out _));
+                Assert.False(l.Cabeceras.ContainsKey("X-RUC"));
+                Assert.True(r.Success);
+                Assert.Equal("20777666555", r.Ruc);
+                Assert.True(r.Certificado.Instalado);
+                Assert.Equal("2027-11-10", r.Certificado.Vence);
+                Assert.Equal(364, r.Certificado.DiasParaVencer);
+                Assert.True(r.Certificado.RucCoincide);
+                Assert.Null(r.Aviso);
+                Assert.Equal("API TENANT CLEAN SAC", r.Respuesta.GetProperty("certificado").Str("titular"));
+            }
+            finally { File.Delete(ruta); }
+        }
+
+        [Fact]
+        public async Task SubirCertificado_desde_bytes_y_stream_codifica_igual_y_lee_ruc_coincide_null()
+        {
+            var contenido = Encoding.UTF8.GetBytes("pfx-de-prueba-ñ/+=");
+            var sinRuc = new
+            {
+                success = true, ruc = "20777666555",
+                certificado = new { instalado = true, titular = "JUAN PEREZ", vence = "2027-11-10", dias_para_vencer = 364, ruc_coincide = (bool?)null },
+                aviso = "No se encontró un RUC en el titular del certificado.",
+            };
+            var (c, m, _) = Cliente(R(200, sinRuc), R(200, sinRuc));
+            var r = await c.Rucs.SubirCertificadoAsync("20777666555", contenido, "x1");
+            using (var s = new MemoryStream(contenido))
+                await c.Rucs.SubirCertificadoAsync("20777666555", s, "x1");
+            Assert.All(m.Llamadas, l => Assert.Equal(Convert.ToBase64String(contenido), l.Cuerpo!.Value.Str("certificado")));
+            Assert.Null(r.Certificado.RucCoincide);
+            Assert.Equal("JUAN PEREZ", r.Certificado.Titular);
+            Assert.NotNull(r.Aviso);
+        }
+
+        [Fact]
+        public async Task SubirCertificado_archivo_inexistente_o_sin_clave_falla_sin_peticion_y_sin_mostrar_la_clave()
+        {
+            var (c, m, _) = Cliente(R(200));
+            var ruta = Path.Combine(Path.GetTempPath(), "no-existe-" + Guid.NewGuid().ToString("N") + ".pfx");
+            var e = await Assert.ThrowsAsync<FactuSmartException>(() => c.Rucs.SubirCertificadoAsync("20777666555", ruta, "SuperSecreta123"));
+            Assert.Contains(ruta, e.Message);
+            Assert.DoesNotContain("SuperSecreta123", e.ToString());
+            await Assert.ThrowsAsync<FactuSmartException>(() => c.Rucs.SubirCertificadoAsync("20777666555", new byte[] { 1 }, ""));
+            await Assert.ThrowsAsync<FactuSmartException>(() => c.Rucs.SubirCertificadoAsync("20777666555", new byte[0], "x"));
+            await Assert.ThrowsAsync<FactuSmartException>(() => c.Rucs.SubirCertificadoAsync(" ", new byte[] { 1 }, "x"));
+            Assert.Empty(m.Llamadas);
+        }
+
+        [Fact]
+        public async Task SubirCertificado_422_que_repite_la_clave_no_la_deja_en_la_excepcion()
+        {
+            const string clave = "Cl@ve/Secreta\"ñ";
+            var contenido = new byte[] { 1, 2, 3, 4, 5, 6 };
+            var b64 = Convert.ToBase64String(contenido);
+            // Un servidor (o proxy) descuidado que devuelve lo que recibió.
+            var eco = new
+            {
+                success = false,
+                message = $"El certificado no abre con la clave {clave}.",
+                codigo = "DATOS_INVALIDOS", reintentable = false,
+                campos = new { clave = new[] { $"Clave recibida: {clave}" }, certificado = new[] { b64 } },
+                recibido = new { certificado = b64, clave },
+            };
+            var (c, m, _) = Cliente(R(422, eco));
+            var e = await Assert.ThrowsAsync<ErrorDeValidacion>(() => c.Rucs.SubirCertificadoAsync("20777666555", contenido, clave));
+            Assert.Single(m.Llamadas); // 422 no se reintenta
+            Assert.Equal("DATOS_INVALIDOS", e.Codigo);
+            var todo = string.Join("\n", e.Message, e.Mensaje, e.ToString(), e.RespuestaTexto, e.Respuesta?.GetRawText(),
+                string.Join(" ", e.Campos.SelectMany(kv => kv.Value)));
+            foreach (var secreto in new[] { clave, b64, "Cl@ve", "Secreta" })
+                Assert.DoesNotContain(secreto, todo);
+            Assert.Contains("***", e.Mensaje);
+        }
+
+        [Fact]
+        public void Ocultar_cubre_el_escapado_de_PHP()
+        {
+            var texto = "{\"message\":\"clave a\\/b\\u00f1 y a/bñ y a\\/b\\u00F1\"}";
+            var limpio = FactuSmartClient.Ocultar(texto, new[] { "a/bñ" });
+            Assert.Equal("{\"message\":\"clave *** y *** y ***\"}", limpio);
+        }
+
+        [Fact]
+        public async Task ConfigurarSunat_manda_solo_los_no_nulos_y_oculta_la_clave_SOL_en_errores()
+        {
+            var (c, m, _) = Cliente(R(200, ConfigOk), R(200, ConfigOk), R(422, new { success = false, message = "clave_sol ClaveSol9 inválida", codigo = "DATOS_INVALIDOS", reintentable = false }));
+            var r = await c.Rucs.ConfigurarSunatAsync("20777666555", "FACTURA1", "ClaveSol9");
+            await c.Rucs.ConfigurarSunatAsync("20777666555", entorno: "produccion");
+            var e = await Assert.ThrowsAsync<ErrorDeValidacion>(() => c.Rucs.ConfigurarSunatAsync("20777666555", "FACTURA1", "ClaveSol9", "produccion"));
+
+            Assert.Equal("PUT", m.Llamadas[0].Metodo);
+            Assert.Equal(Base + "/rucs/20777666555/sunat", m.Llamadas[0].Url.ToString());
+            var c0 = m.Llamadas[0].Cuerpo!.Value;
+            Assert.Equal(new[] { "clave_sol", "usuario_sol" }, c0.EnumerateObject().Select(p => p.Name).OrderBy(x => x, StringComparer.Ordinal));
+            Assert.Equal("FACTURA1", c0.Str("usuario_sol"));
+            Assert.Equal("ClaveSol9", c0.Str("clave_sol"));
+            var c1 = m.Llamadas[1].Cuerpo!.Value;
+            Assert.Equal(new[] { "entorno" }, c1.EnumerateObject().Select(p => p.Name));
+            Assert.Equal(3, m.Llamadas[2].Cuerpo!.Value.EnumerateObject().Count());
+            Assert.All(m.Llamadas, l => Assert.False(l.Cabeceras.ContainsKey("X-RUC")));
+
+            Assert.Equal("produccion", r.Entorno);
+            Assert.True(r.Sol.Configurado);
+            Assert.Equal("FA*****1", r.Sol.Usuario);
+            Assert.Equal("sunat", r.Envio);
+            Assert.True(r.ListoParaProduccion);
+            Assert.Empty(r.Faltantes);
+            Assert.DoesNotContain("ClaveSol9", e.ToString() + e.RespuestaTexto);
+        }
+
+        [Fact]
+        public async Task ConfigurarSunat_valida_localmente_sin_peticion()
+        {
+            var (c, m, _) = Cliente(R(200, ConfigOk));
+            await Assert.ThrowsAsync<FactuSmartException>(() => c.Rucs.ConfigurarSunatAsync("20777666555"));
+            await Assert.ThrowsAsync<FactuSmartException>(() => c.Rucs.ConfigurarSunatAsync("20777666555", usuarioSol: "FACTURA1"));
+            var e = await Assert.ThrowsAsync<FactuSmartException>(() => c.Rucs.ConfigurarSunatAsync("20777666555", "FACTURA1", "ClaveSol9", "real"));
+            Assert.DoesNotContain("ClaveSol9", e.ToString());
+            Assert.Empty(m.Llamadas);
+        }
+
+        [Fact]
+        public async Task Verificar_es_POST_sin_cuerpo_y_Configuracion_es_GET_tipados()
+        {
+            var verif = new
+            {
+                success = true, ruc = "20777666555", listo_para_emitir = false, entorno = "produccion",
+                checks = new
+                {
+                    certificado = new { ok = (bool?)true, mensaje = "Certificado vigente." },
+                    sol = new { ok = (bool?)null, mensaje = "SUNAT no respondió." },
+                },
+            };
+            var recien = new
+            {
+                success = true, ruc = "20777666555", nombre = "API TENANT CLEAN SAC", entorno = "prueba",
+                certificado = new { instalado = false, vence = (string?)null, dias_para_vencer = (int?)null },
+                sol = new { configurado = false, usuario = "MODDATOS" },
+                envio = "sunat", listo_para_produccion = false, faltantes = new[] { "certificado", "sol" },
+            };
+            var (c, m, _) = Cliente(R(200, verif), R(200, recien));
+            var v = await c.Rucs.VerificarAsync("20777666555");
+            var cfg = await c.Rucs.ConfiguracionAsync("20777666555");
+
+            Assert.Equal("POST", m.Llamadas[0].Metodo);
+            Assert.Equal(Base + "/rucs/20777666555/verificar", m.Llamadas[0].Url.ToString());
+            Assert.Null(m.Llamadas[0].Cuerpo);
+            Assert.Equal("GET", m.Llamadas[1].Metodo);
+            Assert.Equal(Base + "/rucs/20777666555/configuracion", m.Llamadas[1].Url.ToString());
+            Assert.All(m.Llamadas, l => Assert.False(l.Cabeceras.ContainsKey("X-RUC")));
+
+            Assert.False(v.ListoParaEmitir);
+            Assert.True(v.Checks.Certificado.Ok);
+            Assert.Null(v.Checks.Sol.Ok);
+            Assert.Equal("SUNAT no respondió.", v.Checks.Sol.Mensaje);
+            Assert.Equal("prueba", cfg.Entorno);
+            Assert.False(cfg.Certificado.Instalado);
+            Assert.Null(cfg.Certificado.Vence);
+            Assert.Null(cfg.Certificado.DiasParaVencer);
+            Assert.Equal(new[] { "certificado", "sol" }, cfg.Faltantes);
+        }
+
+        [Fact]
+        public async Task Verificar_y_Configuracion_se_reintentan_ante_503()
+        {
+            var (c, m, _) = Cliente(R(503), R(200, ConfigOk), R(503), R(200, ConfigOk));
+            await c.Rucs.VerificarAsync("20777666555");
+            await c.Rucs.ConfiguracionAsync("20777666555");
+            Assert.Equal(4, m.Llamadas.Count);
+        }
     }
 }

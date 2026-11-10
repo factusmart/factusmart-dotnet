@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -214,6 +215,114 @@ namespace FactuSmart
         {
             var id = FactuSmartClient.Id(ruc, "el RUC");
             return await _c.JsonAsync(new FactuSmartClient.Peticion("PATCH", $"/rucs/{id}/activation") { Cuerpo = new JsonObject { ["activo"] = activo }, Reintentable = false }, cancellationToken).ConfigureAwait(false);
+        }
+
+        // ───── Configuración del RUC (certificado, SOL, entorno) ─────
+        // El RUC va en la ruta: nunca se manda `ruc` en el cuerpo ni en la query.
+        // La clave, la clave SOL y el certificado nunca salen en una excepción (Peticion.Secretos).
+
+        /// <summary>Entornos que acepta <see cref="ConfigurarSunatAsync"/>.</summary>
+        public static readonly IReadOnlyList<string> Entornos = new[] { "prueba", "produccion" };
+
+        /// <summary>
+        /// PUT /rucs/{ruc}/certificado — lee el .pfx / .p12 de <paramref name="rutaArchivo"/>, lo codifica en
+        /// base64 y lo instala. El API comprueba que abra con la clave, esté vigente y sea de este RUC.
+        /// Reemplaza al anterior; se puede repetir sin efectos extra, así que se reintenta.
+        /// </summary>
+        public async Task<CertificadoSubido> SubirCertificadoAsync(string ruc, string rutaArchivo, string clave, CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrWhiteSpace(rutaArchivo))
+                throw new FactuSmartException("Rucs.SubirCertificadoAsync(ruc, rutaArchivo, clave): falta la ruta del archivo .pfx / .p12.");
+            if (!File.Exists(rutaArchivo))
+                throw new FactuSmartException($"No existe el archivo del certificado: {rutaArchivo}");
+            using (var archivo = new FileStream(rutaArchivo, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, useAsync: true))
+                return await SubirCertificadoAsync(ruc, archivo, clave, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>PUT /rucs/{ruc}/certificado — con el contenido del .pfx / .p12 que ya tienes en memoria.</summary>
+        public Task<CertificadoSubido> SubirCertificadoAsync(string ruc, byte[] bytes, string clave, CancellationToken cancellationToken = default)
+        {
+            if (bytes == null || bytes.Length == 0)
+                throw new FactuSmartException("Rucs.SubirCertificadoAsync(ruc, bytes, clave): el certificado está vacío.");
+            return EnviarCertificadoAsync(ruc, Convert.ToBase64String(bytes), clave, cancellationToken);
+        }
+
+        /// <summary>PUT /rucs/{ruc}/certificado — lee el .pfx / .p12 de un <see cref="Stream"/> (no lo cierra).</summary>
+        public async Task<CertificadoSubido> SubirCertificadoAsync(string ruc, Stream contenido, string clave, CancellationToken cancellationToken = default)
+        {
+            if (contenido == null)
+                throw new FactuSmartException("Rucs.SubirCertificadoAsync(ruc, contenido, clave): pasa el Stream del .pfx / .p12.");
+            using (var ms = new MemoryStream())
+            {
+                await contenido.CopyToAsync(ms, 81920, cancellationToken).ConfigureAwait(false);
+                return await SubirCertificadoAsync(ruc, ms.ToArray(), clave, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        private async Task<CertificadoSubido> EnviarCertificadoAsync(string ruc, string base64, string clave, CancellationToken cancellationToken)
+        {
+            var id = FactuSmartClient.Id(ruc, "el RUC");
+            if (string.IsNullOrEmpty(clave))
+                throw new FactuSmartException("Rucs.SubirCertificadoAsync: falta la clave del certificado.");
+            var p = new FactuSmartClient.Peticion("PUT", $"/rucs/{id}/certificado")
+            {
+                Cuerpo = new JsonObject { ["certificado"] = base64, ["clave"] = clave },
+                Reintentable = true,
+            };
+            p.Secretos.Add(clave);
+            p.Secretos.Add(base64);
+            return await TipadoAsync<CertificadoSubido>(p, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// PUT /rucs/{ruc}/sunat — guarda el usuario secundario SOL y su clave (van juntos) y/o cambia el
+        /// <paramref name="entorno"/> (<c>prueba</c> | <c>produccion</c>). Solo manda los que no son null.
+        /// No llama a SUNAT: para comprobar el SOL usa <see cref="VerificarAsync"/>. Se reintenta (es idempotente).
+        /// </summary>
+        public async Task<ConfiguracionRuc> ConfigurarSunatAsync(string ruc, string? usuarioSol = null, string? claveSol = null, string? entorno = null, CancellationToken cancellationToken = default)
+        {
+            var id = FactuSmartClient.Id(ruc, "el RUC");
+            if (usuarioSol == null && claveSol == null && entorno == null)
+                throw new FactuSmartException("Rucs.ConfigurarSunatAsync: pasa usuarioSol + claveSol, entorno, o los tres.");
+            if ((usuarioSol == null) != (claveSol == null))
+                throw new FactuSmartException("Rucs.ConfigurarSunatAsync: usuarioSol y claveSol van juntos.");
+            if (entorno != null && !Entornos.Contains(entorno))
+                throw new FactuSmartException($"Entorno inválido \"{entorno}\": usa \"prueba\" o \"produccion\".");
+
+            var cuerpo = new JsonObject();
+            if (usuarioSol != null) cuerpo["usuario_sol"] = usuarioSol;
+            if (claveSol != null) cuerpo["clave_sol"] = claveSol;
+            if (entorno != null) cuerpo["entorno"] = entorno;
+            var p = new FactuSmartClient.Peticion("PUT", $"/rucs/{id}/sunat") { Cuerpo = cuerpo, Reintentable = true };
+            if (!string.IsNullOrEmpty(claveSol)) p.Secretos.Add(claveSol!);
+            return await TipadoAsync<ConfiguracionRuc>(p, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// POST /rucs/{ruc}/verificar — prueba el certificado y el usuario SOL contra SUNAT sin emitir nada.
+        /// <c>Checks.Sol.Ok</c> null = no se pudo comprobar o no aplica (prueba, OSE/PSE, SUNAT caído).
+        /// Sin efectos: se reintenta.
+        /// </summary>
+        public Task<VerificacionRuc> VerificarAsync(string ruc, CancellationToken cancellationToken = default)
+        {
+            var id = FactuSmartClient.Id(ruc, "el RUC");
+            return TipadoAsync<VerificacionRuc>(new FactuSmartClient.Peticion("POST", $"/rucs/{id}/verificar") { Reintentable = true }, cancellationToken);
+        }
+
+        /// <summary>GET /rucs/{ruc}/configuracion — entorno, certificado, SOL (enmascarado), envío y <c>Faltantes</c>. No llama a SUNAT.</summary>
+        public Task<ConfiguracionRuc> ConfiguracionAsync(string ruc, CancellationToken cancellationToken = default)
+        {
+            var id = FactuSmartClient.Id(ruc, "el RUC");
+            return TipadoAsync<ConfiguracionRuc>(new FactuSmartClient.Peticion("GET", $"/rucs/{id}/configuracion") { Reintentable = true }, cancellationToken);
+        }
+
+        private async Task<T> TipadoAsync<T>(FactuSmartClient.Peticion p, CancellationToken cancellationToken) where T : RespuestaTipada
+        {
+            var json = await _c.JsonAsync(p, cancellationToken).ConfigureAwait(false);
+            var r = JsonSerializer.Deserialize<T>(json.GetRawText())
+                ?? throw new FactuSmartException("El API respondió vacío.", 200, json);
+            r.Respuesta = json;
+            return r;
         }
     }
 

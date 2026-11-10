@@ -10,7 +10,7 @@
     <NoWarn>$(NoWarn);CS1591</NoWarn>
 
     <PackageId>FactuSmart</PackageId>
-    <Version>0.2.0</Version>
+    <Version>0.3.0</Version>
     <Authors>FactuSmart</Authors>
     <Company>FactuSmart</Company>
     <Product>FactuSmart SDK</Product>

@@ -21,11 +21,12 @@ namespace FactuSmart
     /// </summary>
     public sealed class FactuSmartClient : IDisposable
     {
-        public const string Version = "0.2.0";
+        public const string Version = "0.3.0";
 
         private static readonly TimeSpan EsperaMaxima = TimeSpan.FromSeconds(60);
         private static readonly Regex FirmaHex = new Regex("^[0-9a-f]{64}$", RegexOptions.CultureInvariant);
         private static readonly Regex EsperaEnMensaje = new Regex(@"espera\s+(\d+)\s*segundo", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        private static readonly Regex HexMinuscula = new Regex(@"\\u[0-9A-Fa-f]{4}", RegexOptions.CultureInvariant);
         private static readonly Regex TooManyAttempts = new Regex("too many attempts", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
         private readonly HttpClient _http;
@@ -238,6 +239,11 @@ namespace FactuSmart
             /// <summary>Reintentar también ante 409 (solo emitir con Idempotency-Key).</summary>
             public bool ReintentarEn409 { get; set; }
             public bool Binario { get; set; }
+            /// <summary>
+            /// Valores que nunca deben aparecer en una excepción (clave del certificado, clave SOL, el
+            /// certificado en base64). Si el API los repite en su respuesta, se reemplazan por <c>***</c>.
+            /// </summary>
+            public List<string> Secretos { get; } = new List<string>();
         }
 
         internal async Task<JsonElement> JsonAsync(Peticion p, CancellationToken ct)
@@ -250,8 +256,33 @@ namespace FactuSmart
             }
             catch (JsonException)
             {
-                throw new FactuSmartException($"El API respondió algo que no es JSON (HTTP {status}).", status, null, Encoding.UTF8.GetString(bytes));
+                throw new FactuSmartException($"El API respondió algo que no es JSON (HTTP {status}).", status, null, Ocultar(Encoding.UTF8.GetString(bytes), p.Secretos));
             }
+        }
+
+        /// <summary>Reemplaza cada secreto (tal cual y como quedaría escapado dentro de un JSON) por <c>***</c>.</summary>
+        internal static string Ocultar(string texto, IReadOnlyList<string> secretos)
+        {
+            if (string.IsNullOrEmpty(texto) || secretos == null || secretos.Count == 0) return texto;
+            // Los más largos primero: si una clave es parte de otra, no deja trozos a la vista.
+            foreach (var s in secretos.Where(x => !string.IsNullOrEmpty(x)).Distinct().OrderByDescending(x => x.Length))
+            {
+                var escapado = JsonSerializer.Serialize(s);
+                escapado = escapado.Substring(1, escapado.Length - 2);
+                var escapadoRelajado = JsonSerializer.Serialize(s, new JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
+                escapadoRelajado = escapadoRelajado.Substring(1, escapadoRelajado.Length - 2);
+                // PHP (json_encode) escapa además "/" como "\/" y usa hex en minúscula (ñ).
+                var formas = new List<string> { s, escapado, escapadoRelajado };
+                foreach (var f in formas.ToArray())
+                {
+                    formas.Add(f.Replace("/", "\\/"));
+                    formas.Add(HexMinuscula.Replace(f, x => x.Value.ToLowerInvariant()));
+                    formas.Add(HexMinuscula.Replace(f.Replace("/", "\\/"), x => x.Value.ToLowerInvariant()));
+                }
+                foreach (var forma in formas.Distinct().OrderByDescending(x => x.Length))
+                    texto = texto.Replace(forma, "***");
+            }
+            return texto;
         }
 
         internal async Task<byte[]> BytesAsync(Peticion p, CancellationToken ct)
@@ -324,7 +355,7 @@ namespace FactuSmart
                             if (respuesta.IsSuccessStatusCode)
                                 return ((int)respuesta.StatusCode, bytes);
 
-                            var error = ConstruirError(respuesta, bytes);
+                            var error = ConstruirError(respuesta, bytes, p.Secretos);
                             var status = (int)respuesta.StatusCode;
                             // `reintentable: false` en el cuerpo manda sobre la regla por HTTP (ej. 429 LIMITE_PRUEBAS_DIARIO).
                             var transitorio = error.Reintentable != false && (
@@ -356,10 +387,16 @@ namespace FactuSmart
             }
         }
 
-        private static FactuSmartException ConstruirError(HttpResponseMessage respuesta, byte[] bytes)
+        private static FactuSmartException ConstruirError(HttpResponseMessage respuesta, byte[] bytes, IReadOnlyList<string> secretos)
         {
             var status = (int)respuesta.StatusCode;
             var texto = Encoding.UTF8.GetString(bytes);
+            if (secretos.Count > 0)
+            {
+                // Mensaje, Respuesta y RespuestaTexto salen del cuerpo ya limpio: ninguna clave llega a la excepción.
+                texto = Ocultar(texto, secretos);
+                bytes = Encoding.UTF8.GetBytes(texto);
+            }
             JsonElement? cuerpo = null;
             try
             {

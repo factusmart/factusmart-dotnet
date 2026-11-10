@@ -37,6 +37,10 @@ namespace FactuSmart.Tests
             ["listRucs"] = "Rucs.ListarAsync",
             ["createRuc"] = "Rucs.CrearAsync",
             ["setRucActivation"] = "Rucs.ActivarAsync",
+            ["uploadRucCertificate"] = "Rucs.SubirCertificadoAsync",
+            ["updateRucSunat"] = "Rucs.ConfigurarSunatAsync",
+            ["verifyRucConfig"] = "Rucs.VerificarAsync",
+            ["getRucConfig"] = "Rucs.ConfiguracionAsync",
             ["calculateDocument"] = "Comprobantes.CalcularAsync",
             ["listCatalogs"] = "Catalogos.ListarAsync",
             ["getCatalog"] = "Catalogos.ConsultarAsync",
@@ -69,7 +73,7 @@ namespace FactuSmart.Tests
 
             var sobran = Metodos.Keys.Where(k => !ids.Contains(k)).ToList();
             Assert.True(sobran.Count == 0, "métodos del SDK cuyo operationId ya no está en el yaml: " + string.Join(", ", sobran));
-            Assert.Equal(26, ids.Count);
+            Assert.Equal(30, ids.Count);
         }
 
         private static bool Existe(string ruta)

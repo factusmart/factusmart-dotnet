@@ -1,5 +1,23 @@
 # Cambios
 
+## 0.3.0 — 2026-11-10
+
+- Configuración del RUC por API (tag «Configuración del RUC»):
+  - `Rucs.SubirCertificadoAsync(ruc, rutaArchivo | byte[] | Stream, clave)` → `PUT /rucs/{ruc}/certificado`
+    (`uploadRucCertificate`). El SDK lee el .pfx / .p12 y lo manda en base64 (`{ certificado, clave }`).
+    Archivo inexistente → `FactuSmartException` con la ruta, sin la clave y sin petición.
+  - `Rucs.ConfigurarSunatAsync(ruc, usuarioSol?, claveSol?, entorno?)` → `PUT /rucs/{ruc}/sunat`
+    (`updateRucSunat`). Solo manda los no nulos (`usuario_sol`, `clave_sol`, `entorno`); valida
+    localmente `prueba`/`produccion` y que usuario y clave SOL vayan juntos.
+  - `Rucs.VerificarAsync(ruc)` → `POST /rucs/{ruc}/verificar` (`verifyRucConfig`), sin cuerpo.
+  - `Rucs.ConfiguracionAsync(ruc)` → `GET /rucs/{ruc}/configuracion` (`getRucConfig`).
+  - Modelos tipados `CertificadoSubido`, `ConfiguracionRuc` y `VerificacionRuc` (con el JSON crudo en `Respuesta`).
+  - El RUC va solo en la ruta (ni `ruc` en el cuerpo/query ni header). Las cuatro se reintentan.
+- Seguridad: la clave del certificado, la clave SOL y el certificado en base64 se reemplazan por `***`
+  en `Message`, `Mensaje`, `Respuesta`, `RespuestaTexto` y `Campos` de cualquier excepción, aunque el
+  servidor los repita (también en su forma escapada de JSON/PHP). Pruebas con un 422 que hace eco.
+- Fixture `tests/fixtures/openapi.yaml` actualizada (30 operationId).
+
 ## 0.2.0 — 2026-11-06
 
 - Consultas de RUC y DNI (`GET /consultas/{tipo}/{numero}`, operationId `lookupDocument`):

@@ -88,7 +88,7 @@ y reúsalo (por ejemplo como singleton): es seguro usarlo desde varios hilos.
 
 ## Métodos
 
-Todos devuelven `Task<JsonElement>` (salvo `DescargarAsync` y las consultas RUC/DNI) y aceptan un `CancellationToken` al final.
+Todos devuelven `Task<JsonElement>` (salvo `DescargarAsync`, las consultas RUC/DNI y la configuración del RUC) y aceptan un `CancellationToken` al final.
 `opciones` acepta `Ruc` (sobreescribe el del cliente) y, en `EmitirAsync`, `IdempotencyKey`.
 
 | Método | Endpoint | Devuelve |
@@ -118,6 +118,10 @@ Todos devuelven `Task<JsonElement>` (salvo `DescargarAsync` y las consultas RUC/
 | `fs.Rucs.ListarAsync()` | `GET /rucs` | objeto |
 | `fs.Rucs.CrearAsync(new { ruc, empresa, correo, clave })` | `POST /rucs` | objeto (`ya_existia`) |
 | `fs.Rucs.ActivarAsync(ruc, activo)` | `PATCH /rucs/{ruc}/activation` | objeto |
+| `fs.Rucs.SubirCertificadoAsync(ruc, rutaArchivo \| bytes \| stream, clave)` | `PUT /rucs/{ruc}/certificado` | **`CertificadoSubido`** |
+| `fs.Rucs.ConfigurarSunatAsync(ruc, usuarioSol?, claveSol?, entorno?)` | `PUT /rucs/{ruc}/sunat` | **`ConfiguracionRuc`** |
+| `fs.Rucs.VerificarAsync(ruc)` | `POST /rucs/{ruc}/verificar` | **`VerificacionRuc`** |
+| `fs.Rucs.ConfiguracionAsync(ruc)` | `GET /rucs/{ruc}/configuracion` | **`ConfiguracionRuc`** |
 
 Estáticos: `FactuSmartClient.CalcularComprobante(items)` y `FactuSmartClient.VerificarFirmaWebhook(cuerpo, firma, secreto)`.
 
@@ -216,6 +220,39 @@ Console.WriteLine($"{c.Nombre} | {c.Direccion} | quedan {c.ConsultasRestantes} h
   `DesdeCache = true` y no descuenta del cupo. `Estado`, `Condicion`, `Direccion` y `Ubigeo` pueden venir en null.
 - Cupo agotado: `LimiteDePeticiones` con `Codigo` `LIMITE_CONSULTAS`, **sin reintentos**. No encontrado:
   `NoEncontrado`; número inválido: `ErrorDeValidacion`; `503 CONSULTA_NO_DISPONIBLE` se reintenta.
+
+### Configurar un RUC (certificado, SOL y entorno)
+
+Para dejar un RUC listo para emitir de verdad sin entrar al panel:
+
+```csharp
+// 1. Certificado digital (.pfx / .p12): el SDK lo lee y lo manda en base64.
+var cert = await fs.Rucs.SubirCertificadoAsync("20777666555", @"C:\certs\empresa.pfx", claveDelPfx);
+// también: SubirCertificadoAsync(ruc, byte[] bytes, clave) o SubirCertificadoAsync(ruc, Stream, clave)
+Console.WriteLine($"{cert.Certificado.Titular} vence {cert.Certificado.Vence} (RUC coincide: {cert.Certificado.RucCoincide})");
+
+// 2. Usuario secundario SOL + clave, y pasar a producción (manda solo lo que no es null).
+var cfg = await fs.Rucs.ConfigurarSunatAsync("20777666555", usuarioSol: "FACTURA1", claveSol: claveSol, entorno: "produccion");
+
+// 3. Prueba real contra SUNAT, sin emitir nada.
+var v = await fs.Rucs.VerificarAsync("20777666555");
+if (v.Checks.Sol.Ok == false) Console.WriteLine(v.Checks.Sol.Mensaje);
+
+// 4. Ver cómo quedó (no llama a SUNAT).
+var estado = await fs.Rucs.ConfiguracionAsync("20777666555");
+Console.WriteLine($"{estado.Entorno} listo={estado.ListoParaProduccion} faltan={string.Join(",", estado.Faltantes)}");
+```
+
+- El RUC va en la ruta: no se manda el RUC emisor del cliente. No consumen crédito.
+- `RucCoincide` y `Checks.*.Ok` pueden ser `null` (no se pudo comprobar o no aplica: en prueba,
+  con OSE/PSE o si SUNAT no responde). `entorno` acepta `"prueba"` o `"produccion"`; `usuarioSol` y
+  `claveSol` van juntos. La llave de prueba (`fs_test_…`) no puede subir certificados ni cambiar SOL o
+  entorno (`RucNoAutorizado`, `Codigo` `SIN_PERMISO`).
+- **La clave del certificado, la clave SOL y el contenido del certificado nunca aparecen en una
+  excepción** (`Message`, `Mensaje`, `Respuesta`, `RespuestaTexto`, `ToString()`): si el servidor los
+  repite, el SDK los cambia por `***`. El SDK no escribe logs.
+- Archivo inexistente → `FactuSmartException` con la ruta (nunca la clave), sin petición.
+- Las cuatro se reintentan (los `PUT` reemplazan lo anterior; verificar y consultar no tienen efectos).
 
 ## ¿Calcular en el servidor o local?
 
@@ -363,8 +400,9 @@ constante y nunca lanza: si la firma o el secreto faltan o están mal formados, 
 - Se reintenta solo ante: error de red/timeout, 429, 502, 503, 504 y, en `EmitirAsync`, 409
   ("emisión en curso con esa clave"). Espera creciente: 1 s, 2 s, 4 s… (máx. 60 s). Ante límite de
   peticiones se respeta `Retry-After` o el "Espera N segundos" del mensaje.
-- Se reintentan: todos los GET, `EmitirAsync`, `CalcularAsync` (no tiene efectos) y `Rucs.CrearAsync`
-  (idempotente por RUC). En estas operaciones también se reintenta cuando el API responde
+- Se reintentan: todos los GET, `EmitirAsync`, `CalcularAsync` (no tiene efectos), `Rucs.CrearAsync`
+  (idempotente por RUC), `Rucs.SubirCertificadoAsync`, `Rucs.ConfigurarSunatAsync` (los dos reemplazan
+  lo anterior) y `Rucs.VerificarAsync` (no emite). En estas operaciones también se reintenta cuando el API responde
   `reintentable: true` (ej. `ERROR_INTERNO`, `SUNAT_NO_DISPONIBLE`), con el mismo tope y la misma espera.
 - **`reintentable: false` manda:** si el cuerpo del error trae `reintentable: false`, no se reintenta
   nunca, aunque el HTTP sea 429, 409, 502, 503 o 504 (caso real: 429 `LIMITE_PRUEBAS_DIARIO`). Si el
