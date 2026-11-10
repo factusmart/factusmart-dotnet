@@ -279,16 +279,28 @@ namespace FactuSmart
 
         /// <summary>
         /// PUT /rucs/{ruc}/sunat — guarda el usuario secundario SOL y su clave (van juntos), la
-        /// <paramref name="modalidad"/> de firma (<c>propio</c> | <c>pse</c>) con las credenciales CPE de
+        /// <paramref name="modalidad"/> de firma (<c>propio</c> | <c>pse</c>) con las credenciales de
         /// Smart PSE (<paramref name="pseUsuario"/> + <paramref name="pseClave"/>, van juntos) y/o el
         /// <paramref name="entorno"/> (<c>prueba</c> | <c>produccion</c>; <c>demo</c> = <c>prueba</c>).
-        /// Solo manda los que no son null. Repetir <c>modalidad: "pse"</c> sin credenciales sobre un RUC ya
-        /// en PSE no cambia nada. Con <c>pse</c>, lee <see cref="ConfiguracionRuc.Aviso"/>: el contribuyente
-        /// debe designar a Smart PSE como su PSE en SUNAT con su Clave SOL.
+        /// Solo manda los que no son null.
+        /// <para>Dos caminos para producción: <c>propio</c> = tu certificado (<see cref="SubirCertificadoAsync(string, string, string, CancellationToken)"/>)
+        /// + usuario SOL, directo a SUNAT; <c>pse</c> = Smart PSE (el único PSE) firma y envía: <b>no hace falta
+        /// certificado</b>, pero sí <paramref name="pseUsuario"/> (<c>usuario_secundaria</c> de Smart PSE) y
+        /// <paramref name="pseClave"/> (su <c>token_acceso</c>) —obligatorios si el RUC aún no los tiene— y, en
+        /// producción, también el usuario SOL (lo usan Consultar CDR y el auto-arreglo del 1033).</para>
+        /// <para>Con <c>pse</c>, antes de emitir en producción el contribuyente debe <b>designar a Smart PSE como su
+        /// PSE en SUNAT</b> (Clave SOL → Empresas → PSE); <see cref="VerificarAsync"/> no puede comprobarlo. Lee
+        /// <see cref="ConfiguracionRuc.Aviso"/>.</para>
+        /// <para><paramref name="confirmar"/>: pasar un RUC de producción a <c>prueba</c> exige <c>true</c> (si no,
+        /// 422 <c>CONFIRMAR_CAMBIO_ENTORNO</c>, no reintentable); <c>"confirmar": true</c> solo se manda si se pasa
+        /// <c>true</c>. Otros errores: 403 <c>RUC_DESACTIVADO</c> (RUC bloqueado o plan vencido), 429
+        /// <c>LIMITE_VERIFICACIONES</c> (más de 10 por hora con clave SOL o credenciales PSE; ver
+        /// <see cref="LimiteDePeticiones.SegundosDeEspera"/>) y 503 <c>PSE_NO_DISPONIBLE</c> (Smart PSE no respondió
+        /// en producción; no se guardó nada).</para>
         /// No llama a SUNAT: para comprobar usa <see cref="VerificarAsync"/>. Cambia la configuración: no se reintenta.
         /// </summary>
         public async Task<ConfiguracionRuc> ConfigurarSunatAsync(string ruc, string? usuarioSol = null, string? claveSol = null, string? entorno = null,
-            string? modalidad = null, string? pseUsuario = null, string? pseClave = null, CancellationToken cancellationToken = default)
+            string? modalidad = null, string? pseUsuario = null, string? pseClave = null, bool? confirmar = null, CancellationToken cancellationToken = default)
         {
             var id = FactuSmartClient.Id(ruc, "el RUC");
             if (usuarioSol == null && claveSol == null && entorno == null && modalidad == null && pseUsuario == null && pseClave == null)
@@ -309,6 +321,7 @@ namespace FactuSmart
             if (modalidad != null) cuerpo["modalidad"] = modalidad;
             if (pseUsuario != null) cuerpo["pse_usuario"] = pseUsuario;
             if (pseClave != null) cuerpo["pse_clave"] = pseClave;
+            if (confirmar == true) cuerpo["confirmar"] = true;
             var p = new FactuSmartClient.Peticion("PUT", $"/rucs/{id}/sunat") { Cuerpo = cuerpo, Reintentable = false };
             if (!string.IsNullOrEmpty(claveSol)) p.Secretos.Add(claveSol!);
             if (!string.IsNullOrEmpty(pseClave)) p.Secretos.Add(pseClave!);
@@ -316,16 +329,28 @@ namespace FactuSmart
         }
 
         /// <summary>
+        /// Firma de la 0.4.0 (compatibilidad binaria y con llamadas posicionales que pasan el token).
+        /// Equivale a la sobrecarga completa sin <c>confirmar</c>.
+        /// </summary>
+        public Task<ConfiguracionRuc> ConfigurarSunatAsync(string ruc, string? usuarioSol, string? claveSol, string? entorno,
+            string? modalidad, string? pseUsuario, string? pseClave, CancellationToken cancellationToken)
+            => ConfigurarSunatAsync(ruc, usuarioSol, claveSol, entorno, modalidad, pseUsuario, pseClave, null, cancellationToken);
+
+        /// <summary>
         /// Firma de la 0.3.0 (compatibilidad binaria y con llamadas posicionales que pasan el token).
-        /// Equivale a la sobrecarga completa sin modalidad ni credenciales PSE.
+        /// Equivale a la sobrecarga completa sin modalidad, credenciales PSE ni <c>confirmar</c>.
         /// </summary>
         public Task<ConfiguracionRuc> ConfigurarSunatAsync(string ruc, string? usuarioSol, string? claveSol, string? entorno, CancellationToken cancellationToken)
-            => ConfigurarSunatAsync(ruc, usuarioSol, claveSol, entorno, null, null, null, cancellationToken);
+            => ConfigurarSunatAsync(ruc, usuarioSol, claveSol, entorno, null, null, null, null, cancellationToken);
 
         /// <summary>
         /// POST /rucs/{ruc}/verificar — prueba el certificado y el usuario SOL contra SUNAT sin emitir nada.
         /// <c>Checks.Sol.Ok</c> null = no se pudo comprobar o no aplica (prueba, OSE/PSE, SUNAT caído).
-        /// Sin efectos: se reintenta.
+        /// No comprueba que Smart PSE esté designado como PSE en SUNAT. Máximo 10 por hora por llave y RUC:
+        /// después, 429 <c>LIMITE_VERIFICACIONES</c> (<see cref="LimiteDePeticiones"/>, <c>Reintentable</c> true) que el
+        /// SDK no reintenta solo porque la espera es larga: usa <see cref="LimiteDePeticiones.SegundosDeEspera"/>
+        /// (Retry-After). RUC bloqueado o plan vencido: 403 <c>RUC_DESACTIVADO</c>.
+        /// Sin efectos: se reintenta (red, 5xx, LIMITE_PETICIONES).
         /// </summary>
         public Task<VerificacionRuc> VerificarAsync(string ruc, CancellationToken cancellationToken = default)
         {
@@ -333,7 +358,11 @@ namespace FactuSmart
             return TipadoAsync<VerificacionRuc>(new FactuSmartClient.Peticion("POST", $"/rucs/{id}/verificar") { Reintentable = true }, cancellationToken);
         }
 
-        /// <summary>GET /rucs/{ruc}/configuracion — entorno, certificado, SOL (enmascarado), envío y <c>Faltantes</c>. No llama a SUNAT.</summary>
+        /// <summary>
+        /// GET /rucs/{ruc}/configuracion — entorno, certificado, SOL (enmascarado), envío, <c>Modalidad</c>, <c>Pse</c>,
+        /// <c>Faltantes</c> (p. ej. <c>certificado_otro_ruc</c>, o <c>sol</c> con pse en producción) y <c>Aviso</c>.
+        /// No llama a SUNAT. Sigue abierto aunque el RUC esté desactivado.
+        /// </summary>
         public Task<ConfiguracionRuc> ConfiguracionAsync(string ruc, CancellationToken cancellationToken = default)
         {
             var id = FactuSmartClient.Id(ruc, "el RUC");

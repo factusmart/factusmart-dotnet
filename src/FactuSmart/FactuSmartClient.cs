@@ -21,7 +21,7 @@ namespace FactuSmart
     /// </summary>
     public sealed class FactuSmartClient : IDisposable
     {
-        public const string Version = "0.4.0";
+        public const string Version = "0.5.0";
 
         private static readonly TimeSpan EsperaMaxima = TimeSpan.FromSeconds(60);
         private static readonly Regex FirmaHex = new Regex("^[0-9a-f]{64}$", RegexOptions.CultureInvariant);
@@ -358,7 +358,9 @@ namespace FactuSmart
                             var error = ConstruirError(respuesta, bytes, p.Secretos);
                             var status = (int)respuesta.StatusCode;
                             // `reintentable: false` en el cuerpo manda sobre la regla por HTTP (ej. 429 LIMITE_PRUEBAS_DIARIO).
-                            var transitorio = error.Reintentable != false && (
+                            // 429 LIMITE_VERIFICACIONES es reintentable tras una espera larga (hasta 1 h): no se reintenta
+                            // solo; la excepción trae SegundosDeEspera (Retry-After) para que el integrador decida.
+                            var transitorio = error.Codigo != "LIMITE_VERIFICACIONES" && error.Reintentable != false && (
                                 error is LimiteDePeticiones || status == 502 || status == 503 || status == 504 ||
                                 (status == 409 && p.ReintentarEn409) ||
                                 // Señal adicional del API; solo cuenta en operaciones reintentables (en las demás maxIntentos es 1).
@@ -434,7 +436,7 @@ namespace FactuSmart
             if (cuerpo is JsonElement cc && cc.ValueKind == JsonValueKind.Object && cc.TryGetProperty("codigo", out var cod) && cod.ValueKind == JsonValueKind.String)
                 codigo = cod.GetString();
             // Servidores anteriores convertían el 429 del limitador en un 500 "Too Many Attempts.".
-            var esLimite = status == 429 || codigo == "LIMITE_PETICIONES" || (status == 500 && TooManyAttempts.IsMatch(mensaje));
+            var esLimite = status == 429 || codigo == "LIMITE_PETICIONES" || codigo == "LIMITE_VERIFICACIONES" || (status == 500 && TooManyAttempts.IsMatch(mensaje));
             if (esLimite)
                 return new LimiteDePeticiones(mensaje, status, cuerpo, texto, LeerSegundosDeEspera(respuesta.Headers.RetryAfter, mensaje));
             switch (status)

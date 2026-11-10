@@ -1082,5 +1082,99 @@ namespace FactuSmart.Tests
             Assert.Equal("propio", v2.Modalidad);
             Assert.Null(v2.Checks.Pse);
         }
+
+        // ───── 0.5.0: confirmar y códigos nuevos de la configuración del RUC ─────
+
+        [Fact]
+        public async Task ConfigurarSunat_confirmar_solo_se_manda_cuando_es_true()
+        {
+            var (c, m, _) = Cliente(R(200, ConfigOk), R(200, ConfigOk), R(200, ConfigOk), R(200, ConfigOk));
+            await c.Rucs.ConfigurarSunatAsync("20777666555", entorno: "prueba", confirmar: true);
+            await c.Rucs.ConfigurarSunatAsync("20777666555", entorno: "prueba", confirmar: false);
+            await c.Rucs.ConfigurarSunatAsync("20777666555", entorno: "prueba");
+            await c.Rucs.ConfigurarSunatAsync("20777666555", "FACTURA1", "ClaveSol9", "prueba", null, null, null, CancellationToken.None); // firma 0.4.0
+            Assert.Equal(new[] { "confirmar", "entorno" }, m.Llamadas[0].Cuerpo!.Value.EnumerateObject().Select(x => x.Name).OrderBy(x => x, StringComparer.Ordinal));
+            Assert.True(m.Llamadas[0].Cuerpo!.Value.GetProperty("confirmar").GetBoolean());
+            Assert.Equal(new[] { "entorno" }, m.Llamadas[1].Cuerpo!.Value.EnumerateObject().Select(x => x.Name));
+            Assert.Equal(new[] { "entorno" }, m.Llamadas[2].Cuerpo!.Value.EnumerateObject().Select(x => x.Name));
+            Assert.Equal(3, m.Llamadas[3].Cuerpo!.Value.EnumerateObject().Count());
+
+            // Solo confirmar no es nada que guardar: falla sin petición.
+            await Assert.ThrowsAsync<FactuSmartException>(() => c.Rucs.ConfigurarSunatAsync("20777666555", confirmar: true));
+            Assert.Equal(4, m.Llamadas.Count);
+        }
+
+        [Fact]
+        public async Task Confirmar_cambio_entorno_es_422_no_reintentable()
+        {
+            var (c, m, esperas) = Cliente(R(422, new
+            {
+                success = false,
+                message = "El RUC emite en producción. Los comprobantes en prueba no tienen validez y usan la misma numeración. Repite con confirmar: true.",
+                codigo = "CONFIRMAR_CAMBIO_ENTORNO", reintentable = false,
+            }));
+            var e = await Assert.ThrowsAsync<ErrorDeValidacion>(() => c.Rucs.ConfigurarSunatAsync("20777666555", entorno: "prueba"));
+            Assert.Equal("CONFIRMAR_CAMBIO_ENTORNO", e.Codigo);
+            Assert.False(e.Reintentable);
+            Assert.Single(m.Llamadas);
+            Assert.Empty(esperas);
+            foreach (var cod in new[] { "LIMITE_VERIFICACIONES", "CONFIRMAR_CAMBIO_ENTORNO", "PSE_NO_DISPONIBLE", "RUC_DESACTIVADO" })
+                Assert.Contains(cod, FactuSmartException.CodigosDeError);
+        }
+
+        [Fact]
+        public async Task Limite_verificaciones_trae_Retry_After_y_no_se_reintenta_solo()
+        {
+            var r = R(429, new
+            {
+                success = false, message = "Hiciste más de 10 verificaciones en una hora para este RUC. Espera 1800 segundos e intenta de nuevo.",
+                retry_after = 1800, codigo = "LIMITE_VERIFICACIONES", reintentable = true,
+            });
+            r.Cabeceras["Retry-After"] = "1800";
+            var (c, m, esperas) = Cliente(r);
+            var e = await Assert.ThrowsAsync<LimiteDePeticiones>(() => c.Rucs.VerificarAsync("20777666555"));
+            Assert.Equal("LIMITE_VERIFICACIONES", e.Codigo);
+            Assert.True(e.Reintentable);
+            Assert.Equal(1800, e.SegundosDeEspera);
+            Assert.Single(m.Llamadas);
+            Assert.Empty(esperas);
+        }
+
+        [Fact]
+        public async Task Ruc_desactivado_y_PSE_no_disponible()
+        {
+            var (c, m, esperas) = Cliente(
+                R(403, new { success = false, message = "Este RUC está desactivado o su plan venció. Reactívalo antes de configurarlo.", codigo = "RUC_DESACTIVADO", reintentable = false }),
+                R(503, new { success = false, message = "Smart PSE no respondió al comprobar las credenciales. No se guardó ningún cambio. Intenta de nuevo en unos minutos.", codigo = "PSE_NO_DISPONIBLE", reintentable = true }));
+            var d = await Assert.ThrowsAsync<RucNoAutorizado>(() => c.Rucs.VerificarAsync("20777666555"));
+            Assert.Equal("RUC_DESACTIVADO", d.Codigo);
+            Assert.Single(m.Llamadas);
+
+            var p = await Assert.ThrowsAnyAsync<FactuSmartException>(() => c.Rucs.ConfigurarSunatAsync("20777666555", modalidad: "pse", pseUsuario: "FURZQQ7F", pseClave: "379VMR6U", entorno: "produccion"));
+            Assert.Equal(503, p.Status);
+            Assert.Equal("PSE_NO_DISPONIBLE", p.Codigo);
+            Assert.True(p.Reintentable);
+            Assert.DoesNotContain("379VMR6U", p.ToString());
+            Assert.Equal(2, m.Llamadas.Count); // el PUT no se reintenta solo
+            Assert.Empty(esperas);
+        }
+
+        [Fact]
+        public async Task Configuracion_lee_faltantes_nuevos_y_aviso()
+        {
+            var (c, _, _) = Cliente(R(200, new
+            {
+                success = true, ruc = "20777666555", nombre = "X", entorno = "produccion",
+                certificado = new { instalado = true, vence = "2026-11-30", dias_para_vencer = 20 },
+                sol = new { configurado = false, usuario = (string?)null },
+                envio = "sunat", modalidad = "propio", pse = (object?)null, listo_para_produccion = false,
+                faltantes = new[] { "certificado_otro_ruc", "sol" },
+                aviso = "El certificado vence el 2026-11-30.",
+            }));
+            var r = await c.Rucs.ConfiguracionAsync("20777666555");
+            Assert.Equal(new[] { Faltante.CertificadoOtroRuc, Faltante.Sol }, r.Faltantes);
+            Assert.Equal("El certificado vence el 2026-11-30.", r.Aviso);
+            Assert.False(r.ListoParaProduccion);
+        }
     }
 }

@@ -108,14 +108,32 @@ namespace FactuSmart
 
         [JsonPropertyName("listo_para_produccion")] public bool ListoParaProduccion { get; set; }
 
-        /// <summary><c>certificado</c>, <c>certificado_vencido</c>, <c>certificado_sin_clave_privada</c>, <c>sol</c>, <c>pse_credenciales</c>.</summary>
+        /// <summary>
+        /// <c>certificado</c>, <c>certificado_vencido</c>, <c>certificado_sin_clave_privada</c>, <c>certificado_otro_ruc</c>
+        /// (el certificado instalado no es de este RUC), <c>sol</c> (también con modalidad pse en producción),
+        /// <c>pse_credenciales</c>. Ver las constantes de <see cref="Faltante"/>.
+        /// </summary>
         [JsonPropertyName("faltantes")] public string[] Faltantes { get; set; } = new string[0];
 
         /// <summary>
-        /// Solo en PUT /sunat: designar a Smart PSE en SUNAT (modalidad pse), credenciales PSE que no se
-        /// pudieron comprobar, o comprobantes de prueba al pasar a producción.
+        /// Opcional. En PUT /sunat y en GET /configuracion: recordatorio de designar a Smart PSE como PSE en SUNAT
+        /// (modalidad pse), certificado que vence en menos de 30 días («El certificado vence el AAAA-MM-DD.»),
+        /// credenciales PSE que no se pudieron comprobar en prueba, o el cambio confirmado de producción a prueba.
         /// </summary>
         [JsonPropertyName("aviso")] public string? Aviso { get; set; }
+    }
+
+    /// <summary>Valores de <see cref="ConfiguracionRuc.Faltantes"/>. La lista no es cerrada.</summary>
+    public static class Faltante
+    {
+        public const string Certificado = "certificado";
+        public const string CertificadoVencido = "certificado_vencido";
+        public const string CertificadoSinClavePrivada = "certificado_sin_clave_privada";
+        /// <summary>El certificado instalado no es de este RUC (solo modalidad propio).</summary>
+        public const string CertificadoOtroRuc = "certificado_otro_ruc";
+        /// <summary>Usuario SOL; también obligatorio con modalidad pse en producción.</summary>
+        public const string Sol = "sol";
+        public const string PseCredenciales = "pse_credenciales";
     }
 
     /// <summary>Estado del certificado del RUC.</summary>

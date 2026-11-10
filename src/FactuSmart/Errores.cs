@@ -20,7 +20,8 @@ namespace FactuSmart
             "RUC_SIN_TENANT", "CERTIFICADO_NO_CONFIGURADO", "ERROR_EMISION", "RECHAZADO_SUNAT",
             "REENVIO_FALLIDO", "SUNAT_NO_DISPONIBLE", "LIMITE_PETICIONES", "LIMITE_PRUEBAS_DIARIO",
             "ANULACION_MIXTA", "ERROR_INTERNO", "PDF_NO_GENERADO", "LIMITE_ESTABLECIMIENTOS", "CATALOGO_NO_DISPONIBLE",
-            "LIMITE_CONSULTAS", "CONSULTA_NO_DISPONIBLE",
+            "LIMITE_CONSULTAS", "CONSULTA_NO_DISPONIBLE", "LIMITE_VERIFICACIONES", "CONFIRMAR_CAMBIO_ENTORNO",
+            "PSE_NO_DISPONIBLE",
         };
 
         private static readonly IReadOnlyDictionary<string, string[]> SinCampos = new Dictionary<string, string[]>();
@@ -135,7 +136,9 @@ namespace FactuSmart
     /// Límite superado (HTTP 429). Distingue por <see cref="FactuSmartException.Codigo"/>:
     /// <c>LIMITE_PETICIONES</c> (por minuto, el SDK reintenta) o <c>LIMITE_PRUEBAS_DIARIO</c>
     /// (tope de 200 operaciones/día en RUCs demo; NO se reintenta, se reinicia a medianoche de Lima) o
-    /// <c>LIMITE_CONSULTAS</c> (cupo de consultas RUC/DNI agotado; NO se reintenta, se renueva en <c>se_renueva</c>).
+    /// <c>LIMITE_CONSULTAS</c> (cupo de consultas RUC/DNI agotado; NO se reintenta, se renueva en <c>se_renueva</c>) o
+    /// <c>LIMITE_VERIFICACIONES</c> (más de 10 verificaciones por hora para la misma llave y RUC; <c>Reintentable</c>
+    /// true, pero el SDK no lo reintenta solo porque la espera es larga: espera <see cref="SegundosDeEspera"/>).
     /// </summary>
     public class LimiteDePeticiones : FactuSmartException
     {

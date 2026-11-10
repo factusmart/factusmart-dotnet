@@ -11,12 +11,12 @@ IGV y los totales, consulta los catálogos SUNAT, y descarga el PDF, el XML firm
 
 ## Instalar
 
-Pronto en NuGet. Mientras tanto, descarga `FactuSmart.0.1.0.nupkg` desde la release
-[v0.1.0 en GitHub](https://github.com/factusmart/factusmart-dotnet/releases/tag/v0.1.0), guárdalo en una
+Pronto en NuGet. Mientras tanto, descarga `FactuSmart.0.5.0.nupkg` desde la release
+[v0.5.0 en GitHub](https://github.com/factusmart/factusmart-dotnet/releases/tag/v0.5.0), guárdalo en una
 carpeta (por ejemplo `C:\paquetes`) e instálalo desde ahí:
 
 ```bash
-dotnet add package FactuSmart --version 0.1.0 --source C:\paquetes
+dotnet add package FactuSmart --version 0.5.0 --source C:\paquetes
 ```
 
 `--source` es la carpeta donde guardaste el `.nupkg`, no el archivo.
@@ -223,7 +223,16 @@ Console.WriteLine($"{c.Nombre} | {c.Direccion} | quedan {c.ConsultasRestantes} h
 
 ### Configurar un RUC (certificado, SOL, modalidad y entorno)
 
-Para dejar un RUC listo para emitir de verdad sin entrar al panel:
+Para dejar un RUC listo para emitir de verdad sin entrar al panel. Hay **dos caminos** para producción
+(`modalidad`):
+
+| `modalidad` | Qué necesitas | Quién firma y envía |
+|---|---|---|
+| `propio` | Certificado digital (`SubirCertificadoAsync`) + usuario secundario SOL | Tú, directo a SUNAT |
+| `pse` | Credenciales de **Smart PSE** (`pseUsuario` = `usuario_secundaria`, `pseClave` = `token_acceso`) + usuario SOL. **Sin certificado** | Smart PSE (el único PSE) |
+
+Con `pse`, antes de emitir en producción el contribuyente debe **designar a Smart PSE como su PSE en
+SUNAT** (Clave SOL → Empresas → PSE). `VerificarAsync` no puede comprobarlo.
 
 ```csharp
 // 1. Certificado digital (.pfx / .p12): el SDK lo lee y lo manda en base64.
@@ -241,7 +250,16 @@ if (v.Checks.Sol.Ok == false) Console.WriteLine(v.Checks.Sol.Mensaje);
 // 4. Ver cómo quedó (no llama a SUNAT).
 var estado = await fs.Rucs.ConfiguracionAsync("20777666555");
 Console.WriteLine($"{estado.Entorno} listo={estado.ListoParaProduccion} faltan={string.Join(",", estado.Faltantes)}");
+Console.WriteLine(estado.Aviso); // opcional: designar Smart PSE, certificado por vencer
+
+// Volver de producción a prueba exige confirmar (si no: 422 CONFIRMAR_CAMBIO_ENTORNO).
+// Los comprobantes en prueba no tienen validez y usan la misma numeración.
+await fs.Rucs.ConfigurarSunatAsync("20777666555", entorno: "prueba", confirmar: true);
 ```
+
+`Faltantes` puede traer `certificado`, `certificado_vencido`, `certificado_sin_clave_privada`,
+`certificado_otro_ruc` (el certificado instalado no es de este RUC), `sol` (también con `pse` en
+producción) y `pse_credenciales` (constantes en `Faltante`).
 
 **Sin certificado propio: Smart PSE firma y envía por ti** (`modalidad: "pse"`):
 
@@ -260,8 +278,10 @@ var v = await fs.Rucs.VerificarAsync("20777666555");
 if (v.Checks.Pse?.Ok != true) Console.WriteLine(v.Checks.Pse?.Mensaje); // false = rechazadas · null = no respondió
 ```
 
-- `pseUsuario` y `pseClave` van juntos; `modalidad: "propio"` vuelve a tu certificado (directo a SUNAT).
-  El usuario SOL es opcional con PSE, pero recomendado (guías y consultas a SUNAT).
+- `pseUsuario` y `pseClave` van juntos y son obligatorios si el RUC aún no tiene credenciales de Smart PSE;
+  `modalidad: "propio"` vuelve a tu certificado (directo a SUNAT).
+- En **producción** el usuario SOL también es obligatorio con `pse` (lo usan Consultar CDR y el
+  auto-arreglo del 1033); en prueba es opcional.
 - El RUC va en la ruta: no se manda el RUC emisor del cliente. No consumen crédito.
 - `RucCoincide` y `Checks.*.Ok` pueden ser `null` (no se pudo comprobar o no aplica: en prueba,
   con OSE/PSE o si SUNAT no responde). `entorno` acepta `"prueba"`, `"produccion"` o `"demo"` (= prueba);
@@ -273,6 +293,15 @@ if (v.Checks.Pse?.Ok != true) Console.WriteLine(v.Checks.Pse?.Mensaje); // false
 - Archivo inexistente → `FactuSmartException` con la ruta (nunca la clave), sin petición.
 - Los dos `PUT` (certificado y SOL/modalidad/entorno) **no se reintentan**: cambian la configuración
   del RUC. Verificar y consultar sí (no tienen efectos).
+
+Errores propios de estas llamadas:
+
+| HTTP | `Codigo` | Qué pasó |
+|---|---|---|
+| 403 | `RUC_DESACTIVADO` | RUC bloqueado o plan vencido (certificado, sunat y verificar). `ConfiguracionAsync` sigue abierto |
+| 429 | `LIMITE_VERIFICACIONES` | Más de 10 verificaciones por hora por llave y RUC (`VerificarAsync`, y `ConfigurarSunatAsync` con clave SOL o credenciales PSE). Reintentable tras `SegundosDeEspera` (Retry-After); el SDK no lo reintenta solo porque la espera es larga |
+| 422 | `CONFIRMAR_CAMBIO_ENTORNO` | Pasar de producción a prueba sin `confirmar`. No reintentable: repite con `confirmar: true` |
+| 503 | `PSE_NO_DISPONIBLE` | Smart PSE no respondió con el RUC en producción; no se guardó nada. Reintenta más tarde |
 
 ## ¿Calcular en el servidor o local?
 
@@ -368,6 +397,9 @@ Códigos más comunes (lista en `FactuSmartException.CodigosDeError`; el API pue
 | `LIMITE_PRUEBAS_DIARIO` | 429 **no reintentable**: tope de 200 operaciones/día en RUCs demo |
 | `LIMITE_CONSULTAS` | 429 **no reintentable**: cupo de consultas RUC/DNI agotado (se renueva en `se_renueva`) |
 | `CONSULTA_NO_DISPONIBLE` | 503: SUNAT y el respaldo no responden (reintentable) |
+| `LIMITE_VERIFICACIONES` | 429: más de 10 verificaciones por hora para un RUC (espera `SegundosDeEspera`) |
+| `CONFIRMAR_CAMBIO_ENTORNO` | 422: pasar de producción a prueba sin `confirmar` |
+| `PSE_NO_DISPONIBLE` | 503: Smart PSE no respondió (reintentable) |
 | `ANULACION_MIXTA` | Facturas y boletas en la misma anulación (422) |
 | `LLAVE_DE_PRUEBA_EN_PRODUCCION` | Llave de prueba usada con un RUC en producción (403) |
 | `ERROR_INTERNO` | Error del servidor |
