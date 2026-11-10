@@ -221,13 +221,16 @@ namespace FactuSmart
         // El RUC va en la ruta: nunca se manda `ruc` en el cuerpo ni en la query.
         // La clave, la clave SOL y el certificado nunca salen en una excepción (Peticion.Secretos).
 
-        /// <summary>Entornos que acepta <see cref="ConfigurarSunatAsync"/>.</summary>
-        public static readonly IReadOnlyList<string> Entornos = new[] { "prueba", "produccion" };
+        /// <summary>Entornos que acepta <c>ConfigurarSunatAsync</c> (<c>demo</c> = sinónimo de <c>prueba</c>).</summary>
+        public static readonly IReadOnlyList<string> Entornos = new[] { "prueba", "produccion", "demo" };
+
+        /// <summary>Modalidades de firma: <c>propio</c> (tu certificado, directo a SUNAT) o <c>pse</c> (Smart PSE firma y envía).</summary>
+        public static readonly IReadOnlyList<string> Modalidades = new[] { "propio", "pse" };
 
         /// <summary>
         /// PUT /rucs/{ruc}/certificado — lee el .pfx / .p12 de <paramref name="rutaArchivo"/>, lo codifica en
         /// base64 y lo instala. El API comprueba que abra con la clave, esté vigente y sea de este RUC.
-        /// Reemplaza al anterior; se puede repetir sin efectos extra, así que se reintenta.
+        /// Reemplaza al anterior. Cambia la configuración del RUC: no se reintenta automáticamente.
         /// </summary>
         public async Task<CertificadoSubido> SubirCertificadoAsync(string ruc, string rutaArchivo, string clave, CancellationToken cancellationToken = default)
         {
@@ -267,7 +270,7 @@ namespace FactuSmart
             var p = new FactuSmartClient.Peticion("PUT", $"/rucs/{id}/certificado")
             {
                 Cuerpo = new JsonObject { ["certificado"] = base64, ["clave"] = clave },
-                Reintentable = true,
+                Reintentable = false,
             };
             p.Secretos.Add(clave);
             p.Secretos.Add(base64);
@@ -275,28 +278,49 @@ namespace FactuSmart
         }
 
         /// <summary>
-        /// PUT /rucs/{ruc}/sunat — guarda el usuario secundario SOL y su clave (van juntos) y/o cambia el
-        /// <paramref name="entorno"/> (<c>prueba</c> | <c>produccion</c>). Solo manda los que no son null.
-        /// No llama a SUNAT: para comprobar el SOL usa <see cref="VerificarAsync"/>. Se reintenta (es idempotente).
+        /// PUT /rucs/{ruc}/sunat — guarda el usuario secundario SOL y su clave (van juntos), la
+        /// <paramref name="modalidad"/> de firma (<c>propio</c> | <c>pse</c>) con las credenciales CPE de
+        /// Smart PSE (<paramref name="pseUsuario"/> + <paramref name="pseClave"/>, van juntos) y/o el
+        /// <paramref name="entorno"/> (<c>prueba</c> | <c>produccion</c>; <c>demo</c> = <c>prueba</c>).
+        /// Solo manda los que no son null. Repetir <c>modalidad: "pse"</c> sin credenciales sobre un RUC ya
+        /// en PSE no cambia nada. Con <c>pse</c>, lee <see cref="ConfiguracionRuc.Aviso"/>: el contribuyente
+        /// debe designar a Smart PSE como su PSE en SUNAT con su Clave SOL.
+        /// No llama a SUNAT: para comprobar usa <see cref="VerificarAsync"/>. Cambia la configuración: no se reintenta.
         /// </summary>
-        public async Task<ConfiguracionRuc> ConfigurarSunatAsync(string ruc, string? usuarioSol = null, string? claveSol = null, string? entorno = null, CancellationToken cancellationToken = default)
+        public async Task<ConfiguracionRuc> ConfigurarSunatAsync(string ruc, string? usuarioSol = null, string? claveSol = null, string? entorno = null,
+            string? modalidad = null, string? pseUsuario = null, string? pseClave = null, CancellationToken cancellationToken = default)
         {
             var id = FactuSmartClient.Id(ruc, "el RUC");
-            if (usuarioSol == null && claveSol == null && entorno == null)
-                throw new FactuSmartException("Rucs.ConfigurarSunatAsync: pasa usuarioSol + claveSol, entorno, o los tres.");
+            if (usuarioSol == null && claveSol == null && entorno == null && modalidad == null && pseUsuario == null && pseClave == null)
+                throw new FactuSmartException("Rucs.ConfigurarSunatAsync: pasa usuarioSol + claveSol, entorno, modalidad (con pseUsuario + pseClave si es \"pse\"), o varios juntos.");
             if ((usuarioSol == null) != (claveSol == null))
                 throw new FactuSmartException("Rucs.ConfigurarSunatAsync: usuarioSol y claveSol van juntos.");
+            if ((pseUsuario == null) != (pseClave == null))
+                throw new FactuSmartException("Rucs.ConfigurarSunatAsync: pseUsuario y pseClave van juntos (credenciales CPE de la empresa en Smart PSE).");
             if (entorno != null && !Entornos.Contains(entorno))
-                throw new FactuSmartException($"Entorno inválido \"{entorno}\": usa \"prueba\" o \"produccion\".");
+                throw new FactuSmartException($"Entorno inválido \"{entorno}\": usa \"prueba\", \"produccion\" o \"demo\" (= prueba).");
+            if (modalidad != null && !Modalidades.Contains(modalidad))
+                throw new FactuSmartException($"Modalidad inválida \"{modalidad}\": usa \"propio\" o \"pse\".");
 
             var cuerpo = new JsonObject();
             if (usuarioSol != null) cuerpo["usuario_sol"] = usuarioSol;
             if (claveSol != null) cuerpo["clave_sol"] = claveSol;
             if (entorno != null) cuerpo["entorno"] = entorno;
-            var p = new FactuSmartClient.Peticion("PUT", $"/rucs/{id}/sunat") { Cuerpo = cuerpo, Reintentable = true };
+            if (modalidad != null) cuerpo["modalidad"] = modalidad;
+            if (pseUsuario != null) cuerpo["pse_usuario"] = pseUsuario;
+            if (pseClave != null) cuerpo["pse_clave"] = pseClave;
+            var p = new FactuSmartClient.Peticion("PUT", $"/rucs/{id}/sunat") { Cuerpo = cuerpo, Reintentable = false };
             if (!string.IsNullOrEmpty(claveSol)) p.Secretos.Add(claveSol!);
+            if (!string.IsNullOrEmpty(pseClave)) p.Secretos.Add(pseClave!);
             return await TipadoAsync<ConfiguracionRuc>(p, cancellationToken).ConfigureAwait(false);
         }
+
+        /// <summary>
+        /// Firma de la 0.3.0 (compatibilidad binaria y con llamadas posicionales que pasan el token).
+        /// Equivale a la sobrecarga completa sin modalidad ni credenciales PSE.
+        /// </summary>
+        public Task<ConfiguracionRuc> ConfigurarSunatAsync(string ruc, string? usuarioSol, string? claveSol, string? entorno, CancellationToken cancellationToken)
+            => ConfigurarSunatAsync(ruc, usuarioSol, claveSol, entorno, null, null, null, cancellationToken);
 
         /// <summary>
         /// POST /rucs/{ruc}/verificar — prueba el certificado y el usuario SOL contra SUNAT sin emitir nada.

@@ -952,5 +952,135 @@ namespace FactuSmart.Tests
             await c.Rucs.ConfiguracionAsync("20777666555");
             Assert.Equal(4, m.Llamadas.Count);
         }
+
+        private static readonly object ConfigPse = new
+        {
+            success = true, ruc = "20777666555", nombre = "API TENANT CLEAN SAC", entorno = "produccion",
+            certificado = new { instalado = false, vence = (string?)null, dias_para_vencer = (int?)null },
+            sol = new { configurado = false, usuario = (string?)null },
+            envio = "pse", modalidad = "pse",
+            pse = new { proveedor = "smartpse", configurado = true, usuario = "FU*****F" },
+            listo_para_produccion = true, faltantes = new string[0],
+            aviso = "Con Smart PSE el contribuyente debe designar a Smart PSE como su PSE en SUNAT con su Clave SOL.",
+        };
+
+        [Fact]
+        public async Task ConfigurarSunat_PSE_manda_cuerpo_exacto_y_lee_Modalidad_Pse_y_Aviso()
+        {
+            var (c, m, _) = Cliente(R(200, ConfigPse));
+            var r = await c.Rucs.ConfigurarSunatAsync("20777666555", modalidad: "pse", pseUsuario: "FURZQQ7F", pseClave: "379VMR6U", entorno: "produccion");
+
+            var l = m.Llamadas.Single();
+            Assert.Equal("PUT", l.Metodo);
+            Assert.Equal(Base + "/rucs/20777666555/sunat", l.Url.ToString());
+            var cuerpo = l.Cuerpo!.Value;
+            Assert.Equal(new[] { "entorno", "modalidad", "pse_clave", "pse_usuario" }, cuerpo.EnumerateObject().Select(x => x.Name).OrderBy(x => x, StringComparer.Ordinal));
+            Assert.Equal("pse", cuerpo.Str("modalidad"));
+            Assert.Equal("FURZQQ7F", cuerpo.Str("pse_usuario"));
+            Assert.Equal("379VMR6U", cuerpo.Str("pse_clave"));
+            Assert.Equal("produccion", cuerpo.Str("entorno"));
+
+            Assert.Equal("pse", r.Modalidad);
+            Assert.Equal("pse", r.Envio);
+            Assert.NotNull(r.Pse);
+            Assert.Equal("smartpse", r.Pse!.Proveedor);
+            Assert.True(r.Pse.Configurado);
+            Assert.Equal("FU*****F", r.Pse.Usuario);
+            Assert.Contains("designar a Smart PSE", r.Aviso);
+        }
+
+        [Fact]
+        public async Task ConfigurarSunat_propio_deserializa_Pse_null_y_firma_antigua_con_token_sigue_compilando()
+        {
+            var propio = new
+            {
+                success = true, ruc = "20777666555", nombre = "X", entorno = "produccion",
+                certificado = new { instalado = true, vence = "2027-11-10", dias_para_vencer = 364 },
+                sol = new { configurado = true, usuario = "FA*****1" },
+                envio = "sunat", modalidad = "propio", pse = (object?)null, listo_para_produccion = true, faltantes = new string[0],
+            };
+            var (c, m, _) = Cliente(R(200, propio), R(200, ConfigOk));
+            var r = await c.Rucs.ConfigurarSunatAsync("20777666555", modalidad: "propio");
+            var r2 = await c.Rucs.ConfigurarSunatAsync("20777666555", "FACTURA1", "ClaveSol9", "produccion", CancellationToken.None);
+            Assert.Equal(new[] { "modalidad" }, m.Llamadas[0].Cuerpo!.Value.EnumerateObject().Select(x => x.Name));
+            Assert.Equal("propio", r.Modalidad);
+            Assert.Null(r.Pse);
+            Assert.Null(r.Aviso);
+            Assert.Null(r2.Modalidad); // servidor anterior: no trae modalidad
+            Assert.Equal(3, m.Llamadas[1].Cuerpo!.Value.EnumerateObject().Count());
+        }
+
+        [Fact]
+        public async Task ConfigurarSunat_oculta_pse_clave_en_un_422_que_la_repite()
+        {
+            var (c, m, _) = Cliente(R(422, new
+            {
+                success = false, message = "Smart PSE rechazó la clave 379VMR6U", codigo = "DATOS_INVALIDOS", reintentable = false,
+                campos = new { pse_clave = new[] { "Smart PSE rechazó 379VMR6U" } },
+            }));
+            var e = await Assert.ThrowsAsync<ErrorDeValidacion>(() => c.Rucs.ConfigurarSunatAsync("20777666555", modalidad: "pse", pseUsuario: "FURZQQ7F", pseClave: "379VMR6U"));
+            Assert.DoesNotContain("379VMR6U", e.ToString() + e.Message + e.RespuestaTexto + e.Respuesta?.GetRawText());
+            Assert.Single(m.Llamadas);
+        }
+
+        [Fact]
+        public async Task ConfigurarSunat_valida_PSE_y_modalidad_localmente_y_acepta_demo()
+        {
+            var (c, m, _) = Cliente(R(200, ConfigOk));
+            var e = await Assert.ThrowsAsync<FactuSmartException>(() => c.Rucs.ConfigurarSunatAsync("20777666555", modalidad: "pse", pseUsuario: "FURZQQ7F"));
+            Assert.Contains("pseUsuario y pseClave", e.Message);
+            var e2 = await Assert.ThrowsAsync<FactuSmartException>(() => c.Rucs.ConfigurarSunatAsync("20777666555", pseClave: "379VMR6U"));
+            Assert.DoesNotContain("379VMR6U", e2.ToString());
+            await Assert.ThrowsAsync<FactuSmartException>(() => c.Rucs.ConfigurarSunatAsync("20777666555", modalidad: "ose"));
+            Assert.Empty(m.Llamadas);
+
+            await c.Rucs.ConfigurarSunatAsync("20777666555", entorno: "demo");
+            await c.Rucs.ConfigurarSunatAsync("20777666555", modalidad: "pse"); // sin credenciales: decide el API
+            await c.Rucs.ConfigurarSunatAsync("20777666555", pseUsuario: "FURZQQ7F", pseClave: "379VMR6U"); // sin modalidad: decide el API
+            Assert.Equal(3, m.Llamadas.Count);
+            Assert.Equal("demo", m.Llamadas[0].Cuerpo!.Value.Str("entorno"));
+            Assert.Equal(new[] { "modalidad" }, m.Llamadas[1].Cuerpo!.Value.EnumerateObject().Select(x => x.Name));
+        }
+
+        [Fact]
+        public async Task ConfigurarSunat_y_SubirCertificado_NO_se_reintentan_ante_503()
+        {
+            var (c, m, esperas) = Cliente(R(503, new { success = false, codigo = "ERROR_INTERNO", reintentable = true }));
+            await Assert.ThrowsAnyAsync<FactuSmartException>(() => c.Rucs.ConfigurarSunatAsync("20777666555", modalidad: "pse", pseUsuario: "FURZQQ7F", pseClave: "379VMR6U", entorno: "produccion"));
+            Assert.Single(m.Llamadas);
+            await Assert.ThrowsAnyAsync<FactuSmartException>(() => c.Rucs.SubirCertificadoAsync("20777666555", new byte[] { 1, 2, 3 }, "x1"));
+            Assert.Equal(2, m.Llamadas.Count);
+            Assert.Empty(esperas);
+        }
+
+        [Fact]
+        public async Task Verificar_PSE_lee_Modalidad_y_Checks_Pse()
+        {
+            var verif = new
+            {
+                success = true, ruc = "20777666555", listo_para_emitir = true, entorno = "produccion", modalidad = "pse",
+                checks = new
+                {
+                    certificado = new { ok = (bool?)null, mensaje = "Este RUC envía por PSE." },
+                    sol = new { ok = (bool?)null, mensaje = "Opcional." },
+                    pse = new { ok = (bool?)true, mensaje = "Smart PSE aceptó el usuario y la clave." },
+                },
+            };
+            var sinPse = new
+            {
+                success = true, ruc = "20777666555", listo_para_emitir = true, entorno = "prueba", modalidad = "propio",
+                checks = new { certificado = new { ok = (bool?)true, mensaje = "ok" }, sol = new { ok = (bool?)null, mensaje = "MODDATOS" } },
+            };
+            var (c, _, _) = Cliente(R(200, verif), R(200, sinPse));
+            var v = await c.Rucs.VerificarAsync("20777666555");
+            Assert.Equal("pse", v.Modalidad);
+            Assert.NotNull(v.Checks.Pse);
+            Assert.True(v.Checks.Pse!.Ok);
+            Assert.Equal("Smart PSE aceptó el usuario y la clave.", v.Checks.Pse.Mensaje);
+            Assert.Null(v.Checks.Certificado.Ok);
+            var v2 = await c.Rucs.VerificarAsync("20777666555");
+            Assert.Equal("propio", v2.Modalidad);
+            Assert.Null(v2.Checks.Pse);
+        }
     }
 }

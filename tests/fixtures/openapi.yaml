@@ -1723,10 +1723,10 @@ paths:
     put:
       operationId: updateRucSunat
       tags: [Configuración del RUC]
-      summary: Usuario/clave SOL y entorno
+      summary: Usuario/clave SOL, modalidad (propio / Smart PSE) y entorno
       description: |
-        Guarda el **usuario secundario SOL** y su clave, y/o cambia el **entorno** del RUC
-        (`prueba` = beta de SUNAT, sin validez fiscal · `produccion` = comprobantes reales).
+        Guarda el **usuario secundario SOL** y su clave, la **modalidad** de firma y/o cambia el
+        **entorno** del RUC (`prueba` = sin validez fiscal · `produccion` = comprobantes reales).
 
         - `usuario_sol`: solo el usuario secundario (`FACTURA1`). Si lo mandas con el RUC delante
           (`20777666555FACTURA1`) se limpia. Se guarda en mayúsculas. `usuario_sol` y `clave_sol` van juntos.
@@ -1734,9 +1734,23 @@ paths:
           **usuario/clave SOL** (los de este mismo pedido cuentan). Si falta algo → `422` con `faltantes`
           y no se guarda nada. Solo cambia el entorno: si el RUC envía por OSE o PSE, eso se respeta.
           Un RUC que envía por OSE no se puede poner en `prueba` por API.
+        - `modalidad` (opcional):
+          - `propio` (por defecto): firmas con **tu certificado** (`PUT /rucs/{ruc}/certificado`) y se envía
+            directo a SUNAT. Si el RUC estaba en PSE, se apaga el PSE y se borran sus credenciales; el SOL y
+            el entorno no cambian. Si el RUC queda en `produccion` sin certificado vigente → `422` con
+            `faltantes` y no se guarda nada (instala antes el certificado o manda también `entorno: prueba`).
+          - `pse`: **Smart PSE** firma y envía por ti, sin certificado propio. Primero da de alta la empresa
+            en tu panel/API de Smart PSE y manda aquí sus credenciales CPE: `pse_usuario` + `pse_clave`
+            (van juntos). Se prueban pidiendo un token a Smart PSE (no emite nada): si Smart PSE las
+            rechaza → `422` y no se guarda nada; si no responde, se guardan con un `aviso` (compruébalas
+            luego con `POST /rucs/{ruc}/verificar`). Repetir `modalidad: pse` sin credenciales sobre un RUC
+            ya en PSE no cambia nada. El usuario SOL es **opcional pero recomendado** (lo usan guías y
+            consultas a SUNAT). La respuesta trae un `aviso`: el contribuyente debe **designar a Smart PSE
+            como su PSE en SUNAT** con su Clave SOL; sin eso SUNAT rechaza los comprobantes.
+          - Un RUC que envía por **OSE** no puede cambiar de modalidad por API (`422`).
         - No llama a SUNAT. Para comprobar que el usuario SOL es correcto usa `POST /rucs/{ruc}/verificar`.
 
-        La llave de **prueba** no puede cambiar SOL ni entorno (`403 SIN_PERMISO`). Responde el mismo
+        La llave de **prueba** no puede cambiar SOL, modalidad ni entorno (`403 SIN_PERMISO`). Responde el mismo
         resumen que `GET /rucs/{ruc}/configuracion` (sin claves). Queda registrado en la bitácora de
         acciones críticas (qué cambió, nunca la clave).
       parameters:
@@ -1754,6 +1768,12 @@ paths:
                 value: { entorno: produccion }
               todoJunto:
                 value: { usuario_sol: '20777666555FACTURA1', clave_sol: 'ClaveSol9', entorno: produccion }
+              enviarPorSmartPse:
+                summary: Enviar por Smart PSE (credenciales CPE de Smart PSE)
+                value: { modalidad: pse, pse_usuario: FURZQQ7F, pse_clave: '379VMR6U', entorno: produccion }
+              volverACertificadoPropio:
+                summary: Volver a certificado propio (directo a SUNAT)
+                value: { modalidad: propio }
       responses:
         '200':
           description: Guardado. Devuelve la configuración resultante.
@@ -1761,7 +1781,13 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/RucConfigResponse'
-              example: { success: true, ruc: '20777666555', nombre: API TENANT CLEAN SAC, entorno: produccion, certificado: { instalado: true, vence: '2027-11-10', dias_para_vencer: 364 }, sol: { configurado: true, usuario: 'FA*****1' }, envio: sunat, listo_para_produccion: true, faltantes: [], aviso: 'Este RUC tiene 147 comprobante(s) de prueba. No tienen validez fiscal; puedes borrarlos desde tu portal de integrador.' }
+              examples:
+                propio:
+                  summary: Certificado propio, pasó a producción
+                  value: { success: true, ruc: '20777666555', nombre: API TENANT CLEAN SAC, entorno: produccion, certificado: { instalado: true, vence: '2027-11-10', dias_para_vencer: 364 }, sol: { configurado: true, usuario: 'FA*****1' }, envio: sunat, modalidad: propio, pse: null, listo_para_produccion: true, faltantes: [], aviso: 'Este RUC tiene 147 comprobante(s) de prueba. No tienen validez fiscal; puedes borrarlos desde tu portal de integrador.' }
+                smartPse:
+                  summary: Enviando por Smart PSE
+                  value: { success: true, ruc: '20777666555', nombre: API TENANT CLEAN SAC, entorno: produccion, certificado: { instalado: false, vence: null, dias_para_vencer: null }, sol: { configurado: false, usuario: null }, envio: pse, modalidad: pse, pse: { proveedor: smartpse, configurado: true, usuario: 'FU*****F' }, listo_para_produccion: true, faltantes: [], aviso: 'Con Smart PSE el contribuyente debe designar a Smart PSE como su Proveedor de Servicios Electrónicos (PSE) en SUNAT Operaciones en Línea, con su Clave SOL. Sin esa designación SUNAT rechaza los comprobantes firmados por el PSE. Recomendado: guarda también el usuario/clave SOL secundario (usuario_sol, clave_sol); lo usan las guías y las consultas a SUNAT.' }
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -1776,7 +1802,19 @@ paths:
                 $ref: '#/components/schemas/ValidationError'
               examples:
                 faltaParaProduccion:
-                  value: { success: false, message: 'Para pasar a producción falta: sol. Instala el certificado (PUT /rucs/20777666555/certificado) y el usuario/clave SOL. No se guardó ningún cambio.', codigo: DATOS_INVALIDOS, reintentable: false, campos: { entorno: ['Falta: sol'] }, faltantes: [sol] }
+                  value: { success: false, message: 'Para emitir en producción falta: sol. Instala el certificado (PUT /rucs/20777666555/certificado) y el usuario/clave SOL. No se guardó ningún cambio.', codigo: DATOS_INVALIDOS, reintentable: false, campos: { entorno: ['Falta: sol'] }, faltantes: [sol] }
+                volverAPropioSinCertificado:
+                  summary: 'modalidad: propio en producción sin certificado'
+                  value: { success: false, message: 'Para emitir en producción falta: certificado. Instala el certificado (PUT /rucs/20777666555/certificado) y el usuario/clave SOL, o envía también «entorno»: «prueba». No se guardó ningún cambio.', codigo: DATOS_INVALIDOS, reintentable: false, campos: { modalidad: ['Falta: certificado'] }, faltantes: [certificado] }
+                pseSinCredenciales:
+                  summary: 'modalidad: pse sin pse_usuario/pse_clave'
+                  value: { success: false, message: 'Para enviar por Smart PSE envía pse_usuario y pse_clave (las credenciales CPE de la empresa en tu panel de Smart PSE). No se guardó ningún cambio.', codigo: DATOS_INVALIDOS, reintentable: false, campos: { pse_usuario: ['Obligatorio con «modalidad»: «pse».'], pse_clave: ['Obligatorio con «modalidad»: «pse».'] } }
+                smartPseRechazo:
+                  summary: Smart PSE rechazó las credenciales
+                  value: { success: false, message: 'Smart PSE rechazó el usuario o la clave PSE. Cópialos de nuevo desde tu panel de Smart PSE (credenciales CPE de la empresa). No se guardó ningún cambio.', codigo: DATOS_INVALIDOS, reintentable: false, campos: { pse_clave: ['Smart PSE rechazó el usuario o la clave PSE. Cópialos de nuevo desde tu panel de Smart PSE (credenciales CPE de la empresa).'] } }
+                rucPorOse:
+                  summary: El RUC envía por OSE
+                  value: { success: false, message: 'Este RUC envía por OSE: su modalidad de firma no se cambia por API. Escríbenos a soporte.', codigo: DATOS_INVALIDOS, reintentable: false, campos: { modalidad: ['Este RUC envía por OSE: su modalidad de firma no se cambia por API. Escríbenos a soporte.'] } }
                 usuarioInvalido:
                   value: { success: false, message: 'usuario_sol debe ser el usuario secundario SOL (solo letras y números, sin espacios), con o sin el RUC delante.', codigo: DATOS_INVALIDOS, reintentable: false, campos: { usuario_sol: ['usuario_sol debe ser el usuario secundario SOL (solo letras y números, sin espacios), con o sin el RUC delante.'] } }
         '429':
@@ -1799,6 +1837,11 @@ paths:
           cualquier dato: ahí `sol.ok` es `null` (la verificación real solo aplica en producción) y
           `listo_para_emitir` es `true`.
         - Si el RUC envía por OSE/PSE, el SOL se valida con ese proveedor: `sol.ok: null`.
+        - Con **Smart PSE** (`modalidad: pse`) se agrega `checks.pse`: se pide un token a Smart PSE con el
+          usuario/clave PSE guardados (no emite nada). `ok: false` = Smart PSE los rechazó o no están
+          guardados; `ok: null` = Smart PSE no respondió (reintenta). El certificado propio no se exige
+          (`certificado.ok: null`). `listo_para_emitir` en producción requiere `pse.ok: true`; en prueba,
+          que `pse.ok` no sea `false` (en prueba el motor usa el ambiente demo de Smart PSE).
         - Si SUNAT no responde: `sol.ok: null` con el motivo (no es un error 500). Reintenta luego.
 
         Se puede usar con la llave de prueba. No consume crédito.
@@ -1814,10 +1857,13 @@ paths:
               examples:
                 produccionSolInvalido:
                   summary: Producción, SUNAT rechazó el SOL
-                  value: { success: true, ruc: '20777666555', listo_para_emitir: false, entorno: produccion, checks: { certificado: { ok: true, mensaje: 'Certificado vigente hasta el 2027-11-10 (364 días).' }, sol: { ok: false, mensaje: 'SUNAT rechazó el usuario o la clave SOL (usuario o contraseña incorrectos, o usuario inactivo).' } } }
+                  value: { success: true, ruc: '20777666555', listo_para_emitir: false, entorno: produccion, modalidad: propio, checks: { certificado: { ok: true, mensaje: 'Certificado vigente hasta el 2027-11-10 (364 días).' }, sol: { ok: false, mensaje: 'SUNAT rechazó el usuario o la clave SOL (usuario o contraseña incorrectos, o usuario inactivo).' } } }
                 prueba:
                   summary: En prueba (beta de SUNAT)
-                  value: { success: true, ruc: '20777666555', listo_para_emitir: true, entorno: prueba, checks: { certificado: { ok: true, mensaje: 'Certificado vigente hasta el 2027-11-10 (364 días).' }, sol: { ok: null, mensaje: 'En prueba se emite a la beta de SUNAT con el usuario MODDATOS, que acepta cualquier dato: la verificación real del usuario SOL solo se hace en producción. Tu usuario SOL ya está guardado.' } } }
+                  value: { success: true, ruc: '20777666555', listo_para_emitir: true, entorno: prueba, modalidad: propio, checks: { certificado: { ok: true, mensaje: 'Certificado vigente hasta el 2027-11-10 (364 días).' }, sol: { ok: null, mensaje: 'En prueba se emite a la beta de SUNAT con el usuario MODDATOS, que acepta cualquier dato: la verificación real del usuario SOL solo se hace en producción. Tu usuario SOL ya está guardado.' } } }
+                smartPse:
+                  summary: Enviando por Smart PSE
+                  value: { success: true, ruc: '20777666555', listo_para_emitir: true, entorno: produccion, modalidad: pse, checks: { certificado: { ok: null, mensaje: 'Este RUC envía por PSE: firma el PSE, el certificado propio no es necesario. (No hay certificado instalado.)' }, sol: { ok: null, mensaje: 'Este RUC envía por PSE: los comprobantes van con el usuario/clave PSE, no con el SOL. El SOL es opcional pero recomendado (guías y consultas a SUNAT).' }, pse: { ok: true, mensaje: 'Smart PSE aceptó el usuario y la clave.' } } }
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -1837,8 +1883,9 @@ paths:
         (vencimiento), si tiene usuario SOL (enmascarado), canal de envío y qué falta para producción.
         Nunca devuelve claves. Se puede usar con la llave de prueba. No consume crédito.
 
-        `faltantes` puede traer: `certificado`, `certificado_vencido`, `certificado_sin_clave_privada`, `sol`.
-        Con PSE el certificado propio no se exige.
+        `faltantes` puede traer: `certificado`, `certificado_vencido`, `certificado_sin_clave_privada`, `sol`,
+        `pse_credenciales`. Con PSE (`modalidad: pse`) el certificado propio y el SOL no se exigen; sí
+        el usuario/clave PSE (el usuario sale enmascarado en `pse.usuario`, la clave nunca).
       parameters:
         - $ref: '#/components/parameters/RucPath'
       responses:
@@ -1851,10 +1898,13 @@ paths:
               examples:
                 recienCreado:
                   summary: RUC recién creado (prueba, sin certificado ni SOL)
-                  value: { success: true, ruc: '20777666555', nombre: API TENANT CLEAN SAC, entorno: prueba, certificado: { instalado: false, vence: null, dias_para_vencer: null }, sol: { configurado: false, usuario: MODDATOS }, envio: sunat, listo_para_produccion: false, faltantes: [certificado, sol] }
+                  value: { success: true, ruc: '20777666555', nombre: API TENANT CLEAN SAC, entorno: prueba, certificado: { instalado: false, vence: null, dias_para_vencer: null }, sol: { configurado: false, usuario: MODDATOS }, envio: sunat, modalidad: propio, pse: null, listo_para_produccion: false, faltantes: [certificado, sol] }
                 enProduccion:
                   summary: En producción, todo configurado
-                  value: { success: true, ruc: '20777666555', nombre: API TENANT CLEAN SAC, entorno: produccion, certificado: { instalado: true, vence: '2027-11-10', dias_para_vencer: 364 }, sol: { configurado: true, usuario: 'FA*****1' }, envio: sunat, listo_para_produccion: true, faltantes: [] }
+                  value: { success: true, ruc: '20777666555', nombre: API TENANT CLEAN SAC, entorno: produccion, certificado: { instalado: true, vence: '2027-11-10', dias_para_vencer: 364 }, sol: { configurado: true, usuario: 'FA*****1' }, envio: sunat, modalidad: propio, pse: null, listo_para_produccion: true, faltantes: [] }
+                smartPse:
+                  summary: Enviando por Smart PSE
+                  value: { success: true, ruc: '20777666555', nombre: API TENANT CLEAN SAC, entorno: produccion, certificado: { instalado: false, vence: null, dias_para_vencer: null }, sol: { configurado: false, usuario: null }, envio: pse, modalidad: pse, pse: { proveedor: smartpse, configurado: true, usuario: 'FU*****F' }, listo_para_produccion: true, faltantes: [] }
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -2837,12 +2887,12 @@ components:
             $ref: '#/components/schemas/Error'
           example: { success: false, message: 'Estás usando tu llave de PRUEBA y este RUC está en producción. La llave de prueba solo emite, anula y reenvía en RUCs en modo demo. Usa tu llave de producción.', codigo: LLAVE_DE_PRUEBA_EN_PRODUCCION, reintentable: false }
     TestKeyCannotConfigure:
-      description: La llave de prueba (`fs_test_…`) no puede cambiar certificado, SOL ni entorno.
+      description: La llave de prueba (`fs_test_…`) no puede cambiar certificado, SOL, modalidad ni entorno.
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
-          example: { success: false, message: 'Tu llave de PRUEBA no puede cambiar el certificado, el usuario SOL ni el entorno de un RUC. Usa tu llave de producción. (Con la de prueba sí puedes consultar GET /rucs/{ruc}/configuracion y POST /rucs/{ruc}/verificar.)', codigo: SIN_PERMISO, reintentable: false }
+          example: { success: false, message: 'Tu llave de PRUEBA no puede cambiar el certificado, el usuario SOL, la modalidad (propio/PSE) ni el entorno de un RUC. Usa tu llave de producción. (Con la de prueba sí puedes consultar GET /rucs/{ruc}/configuracion y POST /rucs/{ruc}/verificar.)', codigo: SIN_PERMISO, reintentable: false }
     RucNotInAccount:
       description: El RUC no pertenece a tu cuenta o no existe (misma respuesta en los dos casos).
       content:
@@ -4267,11 +4317,14 @@ components:
         aviso: { type: string, description: 'Solo si `ruc_coincide` es `null`.' }
     UpdateSunatRequest:
       type: object
-      description: 'Envía `usuario_sol` + `clave_sol`, o `entorno`, o los tres.'
+      description: 'Envía `usuario_sol` + `clave_sol`, `entorno`, `modalidad` (con `pse_usuario` + `pse_clave` si es `pse`), o varios juntos.'
       properties:
         usuario_sol: { type: string, maxLength: 40, description: 'Usuario secundario SOL, con o sin el RUC delante.' }
         clave_sol: { type: string, maxLength: 100 }
         entorno: { type: string, enum: [prueba, produccion], description: '`demo` se acepta como sinónimo de `prueba`.' }
+        modalidad: { type: string, enum: [propio, pse], description: '`propio` = tu certificado, directo a SUNAT. `pse` = Smart PSE firma y envía (sin certificado propio).' }
+        pse_usuario: { type: string, maxLength: 100, description: 'Solo con `modalidad: pse`. Usuario CPE de la empresa en Smart PSE (`usuario_secundaria`). Sin espacios. Va con `pse_clave`.' }
+        pse_clave: { type: string, maxLength: 500, writeOnly: true, description: 'Solo con `modalidad: pse`. Clave/token CPE de la empresa en Smart PSE (`token_acceso`). Nunca se devuelve.' }
     RucConfigResponse:
       type: object
       required: [success, ruc, nombre, entorno, certificado, sol, envio, listo_para_produccion, faltantes]
@@ -4296,11 +4349,20 @@ components:
               type: [string, 'null']
               description: 'Usuario secundario enmascarado (`FA*****1`); `MODDATOS` en prueba si no hay uno propio; `null` en producción sin SOL.'
         envio: { type: string, enum: [sunat, ose, pse], description: 'Por dónde se envían los comprobantes.' }
+        modalidad: { type: string, enum: [propio, pse], description: '`pse` si firma un PSE (Smart PSE); `propio` en cualquier otro caso (SUNAT directo u OSE).' }
+        pse:
+          type: [object, 'null']
+          description: 'Solo con `modalidad: pse`; `null` en otro caso.'
+          required: [proveedor, configurado, usuario]
+          properties:
+            proveedor: { type: string, enum: [smartpse, otro] }
+            configurado: { type: boolean, description: 'Hay usuario y clave PSE guardados.' }
+            usuario: { type: [string, 'null'], description: 'Usuario PSE enmascarado (`FU*****F`). La clave nunca se devuelve.' }
         listo_para_produccion: { type: boolean }
         faltantes:
           type: array
-          items: { type: string, enum: [certificado, certificado_vencido, certificado_sin_clave_privada, sol] }
-        aviso: { type: string, description: 'Solo en PUT /sunat al pasar a producción si quedan comprobantes de prueba.' }
+          items: { type: string, enum: [certificado, certificado_vencido, certificado_sin_clave_privada, sol, pse_credenciales] }
+        aviso: { type: string, description: 'Solo en PUT /sunat: aviso de designar a Smart PSE en SUNAT (modalidad pse), de credenciales PSE que no se pudieron comprobar, o de comprobantes de prueba al pasar a producción.' }
     ConfigCheck:
       type: object
       required: [ok, mensaje]
@@ -4317,12 +4379,16 @@ components:
         ruc: { type: string }
         listo_para_emitir: { type: boolean }
         entorno: { type: string, enum: [prueba, produccion] }
+        modalidad: { type: string, enum: [propio, pse] }
         checks:
           type: object
           required: [certificado, sol]
           properties:
             certificado: { $ref: '#/components/schemas/ConfigCheck' }
             sol: { $ref: '#/components/schemas/ConfigCheck' }
+            pse:
+              $ref: '#/components/schemas/ConfigCheck'
+              description: 'Solo con `modalidad: pse`: token de prueba a Smart PSE con las credenciales guardadas (no emite).'
 
     # ───────────── Webhooks ─────────────
     WebhookEvento:

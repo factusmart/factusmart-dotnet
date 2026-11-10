@@ -21,7 +21,7 @@ namespace FactuSmart
     /// </summary>
     public sealed class FactuSmartClient : IDisposable
     {
-        public const string Version = "0.3.0";
+        public const string Version = "0.4.0";
 
         private static readonly TimeSpan EsperaMaxima = TimeSpan.FromSeconds(60);
         private static readonly Regex FirmaHex = new Regex("^[0-9a-f]{64}$", RegexOptions.CultureInvariant);

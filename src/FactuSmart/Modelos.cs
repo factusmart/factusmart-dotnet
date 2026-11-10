@@ -100,12 +100,21 @@ namespace FactuSmart
 
         /// <summary><c>sunat</c>, <c>ose</c> o <c>pse</c>.</summary>
         [JsonPropertyName("envio")] public string Envio { get; set; } = "";
+        /// <summary><c>propio</c> (SUNAT directo u OSE) o <c>pse</c> (firma Smart PSE). null en servidores anteriores.</summary>
+        [JsonPropertyName("modalidad")] public string? Modalidad { get; set; }
+
+        /// <summary>Solo con <c>Modalidad</c> <c>pse</c>; null en otro caso.</summary>
+        [JsonPropertyName("pse")] public EstadoPse? Pse { get; set; }
+
         [JsonPropertyName("listo_para_produccion")] public bool ListoParaProduccion { get; set; }
 
-        /// <summary><c>certificado</c>, <c>certificado_vencido</c>, <c>certificado_sin_clave_privada</c>, <c>sol</c>.</summary>
+        /// <summary><c>certificado</c>, <c>certificado_vencido</c>, <c>certificado_sin_clave_privada</c>, <c>sol</c>, <c>pse_credenciales</c>.</summary>
         [JsonPropertyName("faltantes")] public string[] Faltantes { get; set; } = new string[0];
 
-        /// <summary>Solo en PUT /sunat al pasar a producción si quedan comprobantes de prueba.</summary>
+        /// <summary>
+        /// Solo en PUT /sunat: designar a Smart PSE en SUNAT (modalidad pse), credenciales PSE que no se
+        /// pudieron comprobar, o comprobantes de prueba al pasar a producción.
+        /// </summary>
         [JsonPropertyName("aviso")] public string? Aviso { get; set; }
     }
 
@@ -129,12 +138,28 @@ namespace FactuSmart
         [JsonPropertyName("usuario")] public string? Usuario { get; set; }
     }
 
+    /// <summary>Estado del PSE del RUC (solo con modalidad <c>pse</c>). La clave nunca se devuelve.</summary>
+    public sealed class EstadoPse
+    {
+        /// <summary><c>smartpse</c> u <c>otro</c>.</summary>
+        [JsonPropertyName("proveedor")] public string Proveedor { get; set; } = "";
+
+        /// <summary>Hay usuario y clave PSE guardados.</summary>
+        [JsonPropertyName("configurado")] public bool Configurado { get; set; }
+
+        /// <summary>Usuario PSE enmascarado (<c>FU*****F</c>) o null.</summary>
+        [JsonPropertyName("usuario")] public string? Usuario { get; set; }
+    }
+
     /// <summary>Respuesta de <c>POST /rucs/{ruc}/verificar</c> (<c>VerifyRucConfigResponse</c>).</summary>
     public sealed class VerificacionRuc : RespuestaTipada
     {
         [JsonPropertyName("ruc")] public string Ruc { get; set; } = "";
         [JsonPropertyName("listo_para_emitir")] public bool ListoParaEmitir { get; set; }
         [JsonPropertyName("entorno")] public string Entorno { get; set; } = "";
+
+        /// <summary><c>propio</c> o <c>pse</c>. null en servidores anteriores.</summary>
+        [JsonPropertyName("modalidad")] public string? Modalidad { get; set; }
         [JsonPropertyName("checks")] public ComprobacionesRuc Checks { get; set; } = new ComprobacionesRuc();
     }
 
@@ -143,6 +168,9 @@ namespace FactuSmart
     {
         [JsonPropertyName("certificado")] public Comprobacion Certificado { get; set; } = new Comprobacion();
         [JsonPropertyName("sol")] public Comprobacion Sol { get; set; } = new Comprobacion();
+
+        /// <summary>Solo con modalidad <c>pse</c>: token de prueba a Smart PSE (no emite). null en otro caso.</summary>
+        [JsonPropertyName("pse")] public Comprobacion? Pse { get; set; }
     }
 
     /// <summary>Una comprobación (<c>ConfigCheck</c>).</summary>

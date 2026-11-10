@@ -1,5 +1,20 @@
 # Cambios
 
+## 0.4.0 — 2026-11-10
+
+- `Rucs.ConfigurarSunatAsync` acepta `modalidad` (`propio` | `pse`), `pseUsuario` y `pseClave`
+  (credenciales CPE de Smart PSE, van juntas) → `modalidad`, `pse_usuario`, `pse_clave` en
+  `PUT /rucs/{ruc}/sunat`. Van después de `entorno` y antes del token; la firma de la 0.3.0
+  `(ruc, usuarioSol, claveSol, entorno, cancellationToken)` se conserva como sobrecarga.
+  `modalidad: "pse"` sin credenciales se manda tal cual (el API lo permite sobre un RUC ya en PSE).
+- `entorno` acepta `demo` (sinónimo de `prueba` en el API); antes el SDK lo rechazaba. Nuevo `RecursoRucs.Modalidades`.
+- `pseClave` se reemplaza por `***` en cualquier excepción, igual que la clave SOL.
+- Modelos: `ConfiguracionRuc.Modalidad`, `ConfiguracionRuc.Pse` (`EstadoPse`: `Proveedor`, `Configurado`,
+  `Usuario`; null si no es PSE), `VerificacionRuc.Modalidad` y `Checks.Pse` (null si no es PSE).
+- **Cambio de comportamiento:** `PUT /rucs/{ruc}/sunat` (`ConfigurarSunatAsync`) y `PUT /rucs/{ruc}/certificado`
+  (`SubirCertificadoAsync`) ya **no se reintentan** automáticamente (cambian la configuración), igual que en los otros SDKs.
+- Fixture `tests/fixtures/openapi.yaml` actualizada.
+
 ## 0.3.0 — 2026-11-10
 
 - Configuración del RUC por API (tag «Configuración del RUC»):

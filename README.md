@@ -119,7 +119,7 @@ Todos devuelven `Task<JsonElement>` (salvo `DescargarAsync`, las consultas RUC/D
 | `fs.Rucs.CrearAsync(new { ruc, empresa, correo, clave })` | `POST /rucs` | objeto (`ya_existia`) |
 | `fs.Rucs.ActivarAsync(ruc, activo)` | `PATCH /rucs/{ruc}/activation` | objeto |
 | `fs.Rucs.SubirCertificadoAsync(ruc, rutaArchivo \| bytes \| stream, clave)` | `PUT /rucs/{ruc}/certificado` | **`CertificadoSubido`** |
-| `fs.Rucs.ConfigurarSunatAsync(ruc, usuarioSol?, claveSol?, entorno?)` | `PUT /rucs/{ruc}/sunat` | **`ConfiguracionRuc`** |
+| `fs.Rucs.ConfigurarSunatAsync(ruc, usuarioSol?, claveSol?, entorno?, modalidad?, pseUsuario?, pseClave?)` | `PUT /rucs/{ruc}/sunat` | **`ConfiguracionRuc`** |
 | `fs.Rucs.VerificarAsync(ruc)` | `POST /rucs/{ruc}/verificar` | **`VerificacionRuc`** |
 | `fs.Rucs.ConfiguracionAsync(ruc)` | `GET /rucs/{ruc}/configuracion` | **`ConfiguracionRuc`** |
 
@@ -221,7 +221,7 @@ Console.WriteLine($"{c.Nombre} | {c.Direccion} | quedan {c.ConsultasRestantes} h
 - Cupo agotado: `LimiteDePeticiones` con `Codigo` `LIMITE_CONSULTAS`, **sin reintentos**. No encontrado:
   `NoEncontrado`; número inválido: `ErrorDeValidacion`; `503 CONSULTA_NO_DISPONIBLE` se reintenta.
 
-### Configurar un RUC (certificado, SOL y entorno)
+### Configurar un RUC (certificado, SOL, modalidad y entorno)
 
 Para dejar un RUC listo para emitir de verdad sin entrar al panel:
 
@@ -243,16 +243,36 @@ var estado = await fs.Rucs.ConfiguracionAsync("20777666555");
 Console.WriteLine($"{estado.Entorno} listo={estado.ListoParaProduccion} faltan={string.Join(",", estado.Faltantes)}");
 ```
 
+**Sin certificado propio: Smart PSE firma y envía por ti** (`modalidad: "pse"`):
+
+```csharp
+// 1. Da de alta la empresa en tu panel/API de Smart PSE y copia sus credenciales CPE.
+var cfg = await fs.Rucs.ConfigurarSunatAsync("20777666555",
+    modalidad: "pse", pseUsuario: "FURZQQ7F", pseClave: pseClave, entorno: "produccion");
+Console.WriteLine($"{cfg.Modalidad} {cfg.Pse?.Usuario}"); // pse FU*****F
+
+// 2. Importante: el contribuyente debe designar a Smart PSE como su PSE en SUNAT con su Clave SOL;
+//    sin eso SUNAT rechaza los comprobantes. El API te lo recuerda en cfg.Aviso.
+Console.WriteLine(cfg.Aviso);
+
+// 3. Comprueba las credenciales (pide un token a Smart PSE, no emite nada).
+var v = await fs.Rucs.VerificarAsync("20777666555");
+if (v.Checks.Pse?.Ok != true) Console.WriteLine(v.Checks.Pse?.Mensaje); // false = rechazadas · null = no respondió
+```
+
+- `pseUsuario` y `pseClave` van juntos; `modalidad: "propio"` vuelve a tu certificado (directo a SUNAT).
+  El usuario SOL es opcional con PSE, pero recomendado (guías y consultas a SUNAT).
 - El RUC va en la ruta: no se manda el RUC emisor del cliente. No consumen crédito.
 - `RucCoincide` y `Checks.*.Ok` pueden ser `null` (no se pudo comprobar o no aplica: en prueba,
-  con OSE/PSE o si SUNAT no responde). `entorno` acepta `"prueba"` o `"produccion"`; `usuarioSol` y
-  `claveSol` van juntos. La llave de prueba (`fs_test_…`) no puede subir certificados ni cambiar SOL o
+  con OSE/PSE o si SUNAT no responde). `entorno` acepta `"prueba"`, `"produccion"` o `"demo"` (= prueba);
+  `modalidad`, `"propio"` o `"pse"`; `usuarioSol` y `claveSol` van juntos. La llave de prueba (`fs_test_…`) no puede subir certificados ni cambiar SOL o
   entorno (`RucNoAutorizado`, `Codigo` `SIN_PERMISO`).
-- **La clave del certificado, la clave SOL y el contenido del certificado nunca aparecen en una
+- **La clave del certificado, la clave SOL, la clave PSE y el contenido del certificado nunca aparecen en una
   excepción** (`Message`, `Mensaje`, `Respuesta`, `RespuestaTexto`, `ToString()`): si el servidor los
   repite, el SDK los cambia por `***`. El SDK no escribe logs.
 - Archivo inexistente → `FactuSmartException` con la ruta (nunca la clave), sin petición.
-- Las cuatro se reintentan (los `PUT` reemplazan lo anterior; verificar y consultar no tienen efectos).
+- Los dos `PUT` (certificado y SOL/modalidad/entorno) **no se reintentan**: cambian la configuración
+  del RUC. Verificar y consultar sí (no tienen efectos).
 
 ## ¿Calcular en el servidor o local?
 
@@ -401,14 +421,13 @@ constante y nunca lanza: si la firma o el secreto faltan o están mal formados, 
   ("emisión en curso con esa clave"). Espera creciente: 1 s, 2 s, 4 s… (máx. 60 s). Ante límite de
   peticiones se respeta `Retry-After` o el "Espera N segundos" del mensaje.
 - Se reintentan: todos los GET, `EmitirAsync`, `CalcularAsync` (no tiene efectos), `Rucs.CrearAsync`
-  (idempotente por RUC), `Rucs.SubirCertificadoAsync`, `Rucs.ConfigurarSunatAsync` (los dos reemplazan
-  lo anterior) y `Rucs.VerificarAsync` (no emite). En estas operaciones también se reintenta cuando el API responde
+  (idempotente por RUC) y `Rucs.VerificarAsync` (no emite). En estas operaciones también se reintenta cuando el API responde
   `reintentable: true` (ej. `ERROR_INTERNO`, `SUNAT_NO_DISPONIBLE`), con el mismo tope y la misma espera.
 - **`reintentable: false` manda:** si el cuerpo del error trae `reintentable: false`, no se reintenta
   nunca, aunque el HTTP sea 429, 409, 502, 503 o 504 (caso real: 429 `LIMITE_PRUEBAS_DIARIO`). Si el
   cuerpo no trae `reintentable` (servidor de versión anterior), se usa la regla por HTTP de arriba.
 - **Nunca** se reintentan automáticamente: `Anulaciones.CrearAsync`, `Guias.EmitirAsync` (no acepta
-  `Idempotency-Key`), `ReenviarAsync`, `ConsultarSunatAsync`, `Rucs.ActivarAsync`, aunque el API
+  `Idempotency-Key`), `ReenviarAsync`, `ConsultarSunatAsync`, `Rucs.ActivarAsync`, `Rucs.SubirCertificadoAsync`, `Rucs.ConfigurarSunatAsync`, aunque el API
   responda `reintentable: true`.
 
 ## Desarrollo del SDK
