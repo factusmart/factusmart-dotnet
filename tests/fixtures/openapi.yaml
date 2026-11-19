@@ -253,6 +253,7 @@ info:
     | `LIMITE_VERIFICACIONES` | 429 | **sí** | `POST /rucs/{ruc}/verificar` y `PUT /rucs/{ruc}/sunat` con `clave_sol` o `pse_usuario`/`pse_clave`: más de 10 por hora para la misma llave y RUC. Espera `Retry-After` segundos. |
     | `CONFIRMAR_CAMBIO_ENTORNO` | 422 | no | `PUT /rucs/{ruc}/sunat` con `entorno: prueba` sobre un RUC en producción sin `confirmar: true`. Repite con `confirmar: true` si de verdad quieres pasarlo a prueba. |
     | `PSE_NO_DISPONIBLE` | 503 | **sí** | `PUT /rucs/{ruc}/sunat`: Smart PSE no respondió al comprobar las credenciales de un RUC en producción. No se guardó nada. Reintenta más tarde. |
+    | `NOTA_EXCEDE_COMPROBANTE` | 422 | no | `POST /documents` (nota de crédito): sumando las notas de crédito vivas del comprobante afectado, se acreditaría más que su total. El mensaje dice cuánto queda disponible. No se emitió ni se cobró. |
 
     La lista puede crecer: trata un `codigo` desconocido como no reintentable salvo que
     `reintentable` diga lo contrario.
@@ -1568,6 +1569,50 @@ paths:
           $ref: '#/components/responses/RateLimited'
         '500':
           $ref: '#/components/responses/ServerErrorOrRateLimit'
+
+  /guias/{external_id}/reenviar:
+    post:
+      operationId: resendDispatchGuide
+      tags: [Guías de remisión]
+      summary: Reenviar una guía a SUNAT
+      description: |
+        Vuelve a enviar a SUNAT una guía que quedó **Registrada (`01`)** porque su envío falló
+        (por ejemplo, credenciales GRE mal configuradas; `POST /guias` responde `enviado: false`
+        y no cobra). Cobra 1 crédito solo si el envío sale bien (en modo prueba, 1 del cupo diario).
+        Luego consulta el resultado con `GET /guias/{external_id}/status`. Una guía en otro
+        estado responde `422 REENVIO_FALLIDO` con su `estado`.
+      parameters:
+        - $ref: '#/components/parameters/ExternalId'
+        - $ref: '#/components/parameters/RucQuery'
+        - $ref: '#/components/parameters/XRucHeader'
+      responses:
+        '200':
+          description: 'Guía reenviada a SUNAT (enviado = true), con links y el resumen del cobro.'
+          content:
+            application/json:
+              schema: { type: object }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          description: Sin créditos.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Guía no encontrada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: 'La guía no está en 01, o el reenvío falló (no se cobró; REENVIO_FALLIDO, reintentable).'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /guias/{external_id}/{type}:
     get:
@@ -3298,6 +3343,7 @@ components:
         - LIMITE_VERIFICACIONES
         - CONFIRMAR_CAMBIO_ENTORNO
         - PSE_NO_DISPONIBLE
+        - NOTA_EXCEDE_COMPROBANTE
     Error:
       type: object
       description: |

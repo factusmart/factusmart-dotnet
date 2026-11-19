@@ -21,7 +21,7 @@ namespace FactuSmart
             "REENVIO_FALLIDO", "SUNAT_NO_DISPONIBLE", "LIMITE_PETICIONES", "LIMITE_PRUEBAS_DIARIO",
             "ANULACION_MIXTA", "ERROR_INTERNO", "PDF_NO_GENERADO", "LIMITE_ESTABLECIMIENTOS", "CATALOGO_NO_DISPONIBLE",
             "LIMITE_CONSULTAS", "CONSULTA_NO_DISPONIBLE", "LIMITE_VERIFICACIONES", "CONFIRMAR_CAMBIO_ENTORNO",
-            "PSE_NO_DISPONIBLE",
+            "PSE_NO_DISPONIBLE", "NOTA_EXCEDE_COMPROBANTE",
         };
 
         private static readonly IReadOnlyDictionary<string, string[]> SinCampos = new Dictionary<string, string[]>();

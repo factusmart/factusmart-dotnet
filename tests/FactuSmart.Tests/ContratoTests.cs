@@ -36,6 +36,7 @@ namespace FactuSmart.Tests
             ["emitDispatchGuide"] = "Guias.EmitirAsync",
             ["getDispatchGuideStatus"] = "Guias.EstadoAsync",
             ["downloadDispatchGuideFile"] = "Guias.DescargarAsync",
+            ["resendDispatchGuide"] = "Guias.ReenviarAsync",
             ["listRucs"] = "Rucs.ListarAsync",
             ["createRuc"] = "Rucs.CrearAsync",
             ["setRucActivation"] = "Rucs.ActivarAsync",
@@ -75,7 +76,7 @@ namespace FactuSmart.Tests
 
             var sobran = Metodos.Keys.Where(k => !ids.Contains(k)).ToList();
             Assert.True(sobran.Count == 0, "métodos del SDK cuyo operationId ya no está en el yaml: " + string.Join(", ", sobran));
-            Assert.Equal(32, ids.Count);
+            Assert.Equal(33, ids.Count);
         }
 
         private static bool Existe(string ruta)

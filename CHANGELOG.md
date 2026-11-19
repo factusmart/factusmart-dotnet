@@ -1,5 +1,23 @@
 # Cambios
 
+## 0.7.0 — 2026-11-19
+
+Reenvío de guías a SUNAT y código de error para notas de crédito que exceden el comprobante.
+
+- `Guias.ReenviarAsync(externalId, opciones?, cancellationToken?)` → `POST /guias/{external_id}/reenviar`.
+  Reintenta el envío de una guía que quedó en `01` (Registrado). Cobra 1 crédito solo si sale bien; la respuesta
+  trae `serie_numero`, `enviado`, `estado`, `mensaje`, `links`, `envio` y el resumen del cobro. Envío fallido o
+  guía que no está en `01` → `ErrorDeValidacion` (422, `REENVIO_FALLIDO`; si falló el envío, `reintentable: true`
+  y no se cobra; si es por estado, trae `estado`). Inexistente → `NoEncontrado`. No se reintenta automáticamente.
+- `FactuSmartException.CodigosDeError` suma `NOTA_EXCEDE_COMPROBANTE` (422, no reintentable): la nota de crédito,
+  sumada a las notas vivas del comprobante afectado, pasaría su total.
+- Prueba de contrato con `resendDispatchGuide` (33 operationId); fixture `tests/fixtures/openapi.yaml` actualizada.
+- Instrucciones de instalación apuntan a `FactuSmart.0.7.0.nupkg` (release v0.7.0).
+
+```csharp
+var r = await fs.Guias.ReenviarAsync("a1b2c3");   // r.GetProperty("enviado").GetBoolean() == true
+```
+
 ## 0.6.0 — 2026-11-18
 
 Descarga de archivos de guías y anulaciones, y `links` en las respuestas.

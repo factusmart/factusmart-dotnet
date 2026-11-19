@@ -1238,5 +1238,67 @@ namespace FactuSmart.Tests
             Assert.Equal("https://x/guias/g/cdr", (await c.Guias.EstadoAsync("g")).GetProperty("links").GetProperty("cdr").GetString());
             Assert.Equal("https://x/anulaciones/1/xml", (await c.Anulaciones.EstadoAsync("1")).GetProperty("links").GetProperty("xml").GetString());
         }
+
+        // ───── 0.7.0: reenviar guías y NOTA_EXCEDE_COMPROBANTE ─────
+
+        [Fact]
+        public async Task Guias_reenviar_hace_un_POST_con_ruc_y_devuelve_el_cobro()
+        {
+            var (c, m, _) = Cliente(
+                R(200, new
+                {
+                    success = true, serie_numero = "T001-15", external_id = "g1", enviado = true, estado = "03", mensaje = "Enviada a SUNAT",
+                    links = new { xml = "https://x/guias/g1/xml", pdf = "https://x/guias/g1/pdf", cdr = "https://x/guias/g1/cdr" },
+                    envio = new { ticket = "abc" }, credito_cobrado = true, creditos_restantes = 99,
+                }),
+                R(200, new { success = true, enviado = true }));
+            var r = await c.Guias.ReenviarAsync("g 1/2");
+            Assert.Equal("POST", m.Llamadas[0].Metodo);
+            Assert.Equal(Base + "/guias/g%201%2F2/reenviar", m.Llamadas[0].Url.AbsoluteUri);
+            Assert.Equal("20100070970", m.Llamadas[0].Cuerpo!.Value.GetProperty("ruc").GetString());
+            Assert.False(m.Llamadas[0].Cabeceras.ContainsKey("Idempotency-Key"));
+            Assert.True(r.GetProperty("enviado").GetBoolean());
+            Assert.Equal("T001-15", r.GetProperty("serie_numero").GetString());
+            Assert.True(r.GetProperty("credito_cobrado").GetBoolean());
+            Assert.Equal("https://x/guias/g1/cdr", r.GetProperty("links").GetProperty("cdr").GetString());
+            await c.Guias.ReenviarAsync("g2", new OpcionesRuc { Ruc = "20999999999" });
+            Assert.Equal("20999999999", m.Llamadas[1].Cuerpo!.Value.GetProperty("ruc").GetString());
+            await Assert.ThrowsAsync<FactuSmartException>(() => c.Guias.ReenviarAsync(" "));
+            Assert.Equal(2, m.Llamadas.Count);
+        }
+
+        [Fact]
+        public async Task Guias_reenviar_fallido_lanza_ErrorDeValidacion_sin_reintentar()
+        {
+            var (c, m, _) = Cliente(
+                R(422, new { success = false, message = "SUNAT no respondió; no se cobró.", codigo = "REENVIO_FALLIDO", reintentable = true }),
+                R(422, new { success = false, message = "La guía no está en estado Registrado.", codigo = "REENVIO_FALLIDO", estado = "05" }),
+                R(404, new { success = false, message = "Guía no encontrada.", codigo = "NO_ENCONTRADO", reintentable = false }));
+            var e = await Assert.ThrowsAsync<ErrorDeValidacion>(() => c.Guias.ReenviarAsync("g1"));
+            Assert.Equal("REENVIO_FALLIDO", e.Codigo);
+            Assert.Equal(422, e.Status);
+            Assert.True(e.Reintentable);
+            Assert.Single(m.Llamadas); // reintentable:true no se reintenta solo en un reenvío
+            var e2 = await Assert.ThrowsAsync<ErrorDeValidacion>(() => c.Guias.ReenviarAsync("g1"));
+            Assert.Equal("05", e2.Respuesta!.Value.GetProperty("estado").GetString());
+            var n = await Assert.ThrowsAsync<NoEncontrado>(() => c.Guias.ReenviarAsync("no-existe"));
+            Assert.Equal("NO_ENCONTRADO", n.Codigo);
+            Assert.Equal(3, m.Llamadas.Count);
+        }
+
+        [Fact]
+        public async Task NOTA_EXCEDE_COMPROBANTE_es_un_codigo_conocido_no_reintentable()
+        {
+            Assert.Contains("NOTA_EXCEDE_COMPROBANTE", FactuSmartException.CodigosDeError);
+            var (c, m, _) = Cliente(R(422, new
+            {
+                success = false, message = "La nota excede el total del comprobante: quedan S/ 20.00 disponibles.",
+                codigo = "NOTA_EXCEDE_COMPROBANTE", reintentable = false,
+            }));
+            var e = await Assert.ThrowsAsync<ErrorDeValidacion>(() => c.Comprobantes.EmitirAsync(new { codigo_tipo_documento = "07", serie_documento = "FC01" }));
+            Assert.Equal("NOTA_EXCEDE_COMPROBANTE", e.Codigo);
+            Assert.False(e.Reintentable);
+            Assert.Single(m.Llamadas);
+        }
     }
 }

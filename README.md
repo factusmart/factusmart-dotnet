@@ -11,12 +11,12 @@ IGV y los totales, consulta los catálogos SUNAT, y descarga el PDF, el XML firm
 
 ## Instalar
 
-Pronto en NuGet. Mientras tanto, descarga `FactuSmart.0.6.0.nupkg` desde la release
-[v0.6.0 en GitHub](https://github.com/factusmart/factusmart-dotnet/releases/tag/v0.6.0), guárdalo en una
+Pronto en NuGet. Mientras tanto, descarga `FactuSmart.0.7.0.nupkg` desde la release
+[v0.7.0 en GitHub](https://github.com/factusmart/factusmart-dotnet/releases/tag/v0.7.0), guárdalo en una
 carpeta (por ejemplo `C:\paquetes`) e instálalo desde ahí:
 
 ```bash
-dotnet add package FactuSmart --version 0.6.0 --source C:\paquetes
+dotnet add package FactuSmart --version 0.7.0 --source C:\paquetes
 ```
 
 `--source` es la carpeta donde guardaste el `.nupkg`, no el archivo.
@@ -117,6 +117,7 @@ Todos devuelven `Task<JsonElement>` (salvo `DescargarAsync`, las consultas RUC/D
 | `fs.Guias.EmitirAsync(datos, opciones?)` | `POST /guias` | objeto (revisa `enviado`) |
 | `fs.Guias.EstadoAsync(externalId, opciones?)` | `GET /guias/{id}/status` | objeto |
 | `fs.Guias.DescargarAsync(externalId, "pdf" \| "xml" \| "cdr", opciones?)` | `GET /guias/{id}/{tipo}` | **`byte[]`** |
+| `fs.Guias.ReenviarAsync(externalId, opciones?)` | `POST /guias/{id}/reenviar` | objeto (`enviado`, `estado`, `links`, cobro) |
 | `fs.Rucs.ListarAsync()` | `GET /rucs` | objeto |
 | `fs.Rucs.CrearAsync(new { ruc, empresa, correo, clave })` | `POST /rucs` | objeto (`ya_existia`) |
 | `fs.Rucs.ActivarAsync(ruc, activo)` | `PATCH /rucs/{ruc}/activation` | objeto |
@@ -173,6 +174,24 @@ Son URLs del API: se piden con tu `X-API-Key` (o usa los métodos `DescargarAsyn
 ```csharp
 var urlPdf = r.GetProperty("links").GetProperty("pdf").GetString();
 ```
+
+**Reenviar una guía a SUNAT** (desde 0.7.0): si `Guias.EmitirAsync` respondió `enviado: false` (la guía quedó
+en `01`, Registrado; por ejemplo, credenciales GRE mal configuradas), corrige la causa y reintenta el envío.
+Cobra 1 crédito solo si sale bien.
+
+```csharp
+try
+{
+    var r = await fs.Guias.ReenviarAsync(guiaId);
+    Console.WriteLine($"{r.GetProperty("estado")} {r.GetProperty("mensaje")}");  // luego fs.Guias.EstadoAsync(guiaId)
+}
+catch (ErrorDeValidacion e) when (e.Codigo == "REENVIO_FALLIDO")
+{
+    // El envío falló (no se cobró; e.Reintentable == true) o la guía no está en 01 (ver "estado" en e.Respuesta)
+}
+```
+
+Si la guía no existe se lanza `NoEncontrado`. No se reintenta automáticamente.
 
 ### Anular facturas y boletas
 
@@ -424,6 +443,8 @@ Códigos más comunes (lista en `FactuSmartException.CodigosDeError`; el API pue
 | `CONFIRMAR_CAMBIO_ENTORNO` | 422: pasar de producción a prueba sin `confirmar` |
 | `PSE_NO_DISPONIBLE` | 503: Smart PSE no respondió (reintentable) |
 | `ANULACION_MIXTA` | Facturas y boletas en la misma anulación (422) |
+| `REENVIO_FALLIDO` | 422: el reenvío a SUNAT falló (no se cobró) o el comprobante/guía no está en un estado que se pueda reenviar |
+| `NOTA_EXCEDE_COMPROBANTE` | 422 **no reintentable**: la nota de crédito, sumada a las notas vivas del comprobante afectado, pasaría su total. El mensaje dice cuánto queda disponible; no se emitió ni se cobró |
 | `LLAVE_DE_PRUEBA_EN_PRODUCCION` | Llave de prueba usada con un RUC en producción (403) |
 | `ERROR_INTERNO` | Error del servidor |
 
@@ -482,7 +503,7 @@ constante y nunca lanza: si la firma o el secreto faltan o están mal formados, 
   nunca, aunque el HTTP sea 429, 409, 502, 503 o 504 (caso real: 429 `LIMITE_PRUEBAS_DIARIO`). Si el
   cuerpo no trae `reintentable` (servidor de versión anterior), se usa la regla por HTTP de arriba.
 - **Nunca** se reintentan automáticamente: `Anulaciones.CrearAsync`, `Guias.EmitirAsync` (no acepta
-  `Idempotency-Key`), `ReenviarAsync`, `ConsultarSunatAsync`, `Rucs.ActivarAsync`, `Rucs.SubirCertificadoAsync`, `Rucs.ConfigurarSunatAsync`, aunque el API
+  `Idempotency-Key`), `Guias.ReenviarAsync`, `ReenviarAsync`, `ConsultarSunatAsync`, `Rucs.ActivarAsync`, `Rucs.SubirCertificadoAsync`, `Rucs.ConfigurarSunatAsync`, aunque el API
   responda `reintentable: true`.
 
 ## Desarrollo del SDK

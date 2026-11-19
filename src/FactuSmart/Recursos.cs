@@ -204,6 +204,15 @@ namespace FactuSmart
             => await _c.JsonAsync(new FactuSmartClient.Peticion("GET", $"/guias/{FactuSmartClient.Id(externalId, "el external_id de la guía")}/status") { Query = { ["ruc"] = _c.RucDe(opciones) }, Reintentable = true }, cancellationToken).ConfigureAwait(false);
 
         /// <summary>
+        /// POST /guias/{external_id}/reenviar — reintenta el envío a SUNAT de una guía que quedó en 01 (Registrado).
+        /// Cobra 1 crédito solo si el envío sale bien. Si falla, o la guía no está en 01, lanza
+        /// <see cref="ErrorDeValidacion"/> (422, <c>REENVIO_FALLIDO</c>); si no existe, <see cref="NoEncontrado"/>.
+        /// No se reintenta automáticamente.
+        /// </summary>
+        public async Task<JsonElement> ReenviarAsync(string externalId, OpcionesRuc? opciones = null, CancellationToken cancellationToken = default)
+            => await _c.JsonAsync(new FactuSmartClient.Peticion("POST", $"/guias/{FactuSmartClient.Id(externalId, "el external_id de la guía")}/reenviar") { Cuerpo = _c.CuerpoConRuc(null, opciones, ""), Reintentable = false }, cancellationToken).ConfigureAwait(false);
+
+        /// <summary>
         /// GET /guias/{external_id}/{pdf|xml|cdr} — devuelve los bytes del PDF (A4), el XML firmado o el CDR.
         /// El CDR existe solo cuando SUNAT aceptó la guía; si no, <see cref="NoEncontrado"/>.
         /// </summary>
