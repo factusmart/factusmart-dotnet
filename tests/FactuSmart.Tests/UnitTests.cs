@@ -1176,5 +1176,67 @@ namespace FactuSmart.Tests
             Assert.Equal("El certificado vence el 2026-11-30.", r.Aviso);
             Assert.False(r.ListoParaProduccion);
         }
+
+        // ───── 0.6.0: descargas de guías y anulaciones, y links ─────
+
+        [Fact]
+        public async Task Guias_descargar_devuelve_bytes_y_valida_el_tipo()
+        {
+            var pdf = Encoding.ASCII.GetBytes("%PDF-1.4 guia");
+            var (c, m, _) = Cliente(new RespuestaFalsa { Bytes = pdf });
+            Assert.Equal(pdf, await c.Guias.DescargarAsync("g 1/2", "pdf"));
+            Assert.Equal("GET", m.Llamadas[0].Metodo);
+            Assert.Equal(Base + "/guias/g%201%2F2/pdf?ruc=20100070970", m.Llamadas[0].Url.AbsoluteUri);
+            await c.Guias.DescargarAsync("abc", "xml", new OpcionesRuc { Ruc = "20999999999" });
+            Assert.Equal(Base + "/guias/abc/xml?ruc=20999999999", m.Llamadas[1].Url.ToString());
+            await Assert.ThrowsAsync<FactuSmartException>(() => c.Guias.DescargarAsync("abc", "zip"));
+            await Assert.ThrowsAsync<FactuSmartException>(() => c.Guias.DescargarAsync(" ", "pdf"));
+            Assert.Equal(2, m.Llamadas.Count);
+        }
+
+        [Fact]
+        public async Task Guias_descargar_404_lanza_NoEncontrado_sin_reintentar()
+        {
+            var (c, m, _) = Cliente(R(404, new { success = false, message = "El CDR de esta guía no está disponible todavía.", codigo = "NO_ENCONTRADO", reintentable = false }));
+            var e = await Assert.ThrowsAsync<NoEncontrado>(() => c.Guias.DescargarAsync("abc", "cdr"));
+            Assert.Equal("NO_ENCONTRADO", e.Codigo);
+            Assert.Equal(404, e.Status);
+            Assert.Single(m.Llamadas);
+            Assert.Equal(Base + "/guias/abc/cdr?ruc=20100070970", m.Llamadas[0].Url.ToString());
+        }
+
+        [Fact]
+        public async Task Anulaciones_descargar_devuelve_bytes_y_no_acepta_pdf()
+        {
+            var zip = new byte[] { 0x50, 0x4b, 0x03, 0x04, 0xff };
+            var (c, m, _) = Cliente(new RespuestaFalsa { Bytes = zip });
+            Assert.Equal(zip, await c.Anulaciones.DescargarAsync("1700000000123", "cdr"));
+            Assert.Equal(Base + "/anulaciones/1700000000123/cdr?ruc=20100070970", m.Llamadas[0].Url.ToString());
+            await Assert.ThrowsAsync<FactuSmartException>(() => c.Anulaciones.DescargarAsync("abc", "pdf"));
+            await Assert.ThrowsAsync<FactuSmartException>(() => c.Anulaciones.DescargarAsync(null!, "xml"));
+            Assert.Single(m.Llamadas);
+        }
+
+        [Fact]
+        public async Task Anulaciones_descargar_404_lanza_NoEncontrado_sin_reintentar()
+        {
+            var (c, m, _) = Cliente(R(404, new { success = false, message = "Anulación no encontrada.", codigo = "NO_ENCONTRADO", reintentable = false }));
+            var e = await Assert.ThrowsAsync<NoEncontrado>(() => c.Anulaciones.DescargarAsync("no-existe", "xml"));
+            Assert.Equal("NO_ENCONTRADO", e.Codigo);
+            Assert.Single(m.Llamadas);
+            Assert.Equal(Base + "/anulaciones/no-existe/xml?ruc=20100070970", m.Llamadas[0].Url.ToString());
+        }
+
+        [Fact]
+        public async Task Las_respuestas_traen_links()
+        {
+            var (c, _, _) = Cliente(
+                R(200, new { success = true, external_id = "abc", links = new { pdf = "https://x/documents/abc/pdf", pdf_ticket = "https://x/documents/abc/pdf?formato=ticket", xml = "https://x/documents/abc/xml", cdr = "https://x/documents/abc/cdr" } }),
+                R(200, new { success = true, links = new { xml = "https://x/guias/g/xml", pdf = "https://x/guias/g/pdf", cdr = "https://x/guias/g/cdr" } }),
+                R(200, new { success = true, ticket = "1", links = new { xml = "https://x/anulaciones/1/xml", cdr = "https://x/anulaciones/1/cdr" } }));
+            Assert.Equal("https://x/documents/abc/pdf?formato=ticket", (await c.Comprobantes.ConsultarAsync("abc")).GetProperty("links").GetProperty("pdf_ticket").GetString());
+            Assert.Equal("https://x/guias/g/cdr", (await c.Guias.EstadoAsync("g")).GetProperty("links").GetProperty("cdr").GetString());
+            Assert.Equal("https://x/anulaciones/1/xml", (await c.Anulaciones.EstadoAsync("1")).GetProperty("links").GetProperty("xml").GetString());
+        }
     }
 }

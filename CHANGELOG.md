@@ -1,5 +1,22 @@
 # Cambios
 
+## 0.6.0 — 2026-11-18
+
+Descarga de archivos de guías y anulaciones, y `links` en las respuestas.
+
+- `Guias.DescargarAsync(externalId, "pdf" | "xml" | "cdr", opciones?, cancellationToken?)` →
+  `GET /guias/{external_id}/{tipo}`; devuelve `byte[]`. El CDR de una guía llega como XML.
+- `Anulaciones.DescargarAsync(ticket, "xml" | "cdr", opciones?, cancellationToken?)` →
+  `GET /anulaciones/{ticket}/{tipo}`; devuelve `byte[]` (el CDR es un ZIP). Sin PDF: `"pdf"` lanza
+  `FactuSmartException` sin hacer la petición.
+- Archivo inexistente o CDR aún no disponible → `NoEncontrado` (404, `NO_ENCONTRADO`). Son GET: se reintentan
+  como cualquier GET.
+- Las respuestas traen `links`: comprobantes (`pdf`, `pdf_ticket`, `xml`, `cdr`), guías (`xml`, `pdf`, `cdr`;
+  en `EmitirAsync` dentro de `envio`) y anulaciones (`xml`, `cdr`). Llegan tal cual en el `JsonElement`.
+- Prueba de contrato con `downloadDispatchGuideFile` y `downloadVoidedFile` (32 operationId); fixture
+  `tests/fixtures/openapi.yaml` actualizada.
+- Instrucciones de instalación apuntan a `FactuSmart.0.6.0.nupkg` (release v0.6.0).
+
 ## 0.5.0 — 2026-11-10
 
 Configuración del RUC por API con certificado propio o Smart PSE (contrato nuevo del backend).

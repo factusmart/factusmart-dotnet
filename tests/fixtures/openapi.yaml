@@ -305,6 +305,9 @@ tags:
       - **Smart PSE** (`modalidad: pse`): credenciales de Smart PSE (`pse_usuario` + `pse_clave`) + usuario/clave
         SOL. No necesitas certificado. Además el contribuyente debe **designar a Smart PSE como su PSE en
         SUNAT** (Clave SOL → Empresas → PSE) antes de emitir: el API no puede comprobar esa designación.
+        `pse_usuario` y `pse_clave` son el `usuario_secundaria` y el `token_acceso` de `credenciales_cpe` que
+        devuelve Smart PSE al dar de alta la empresa (`POST /api/v1/companies`,
+        [documentación de Smart PSE](https://smartpse.pe/documentacion)); no el token temporal de 10 minutos.
 
       Si el RUC está bloqueado o su plan venció, los cambios y la verificación responden `403 RUC_DESACTIVADO`
       (`GET /rucs/{ruc}/configuracion` sigue abierto).
@@ -1266,6 +1269,54 @@ paths:
         '500':
           $ref: '#/components/responses/ServerErrorOrRateLimit'
 
+  /anulaciones/{ticket}/{type}:
+    get:
+      operationId: downloadVoidedFile
+      tags: [Anulaciones]
+      summary: Descargar XML o CDR de una anulación
+      description: |
+        XML enviado y CDR (ZIP de SUNAT) de la comunicación de baja o del resumen de anulación. No
+        consume crédito. El CDR existe cuando SUNAT ya respondió (consulta `/anulaciones/{ticket}/status`).
+        `POST /anulaciones` y `/status` traen estos enlaces en `links`.
+      parameters:
+        - name: ticket
+          in: path
+          required: true
+          description: Ticket devuelto por `POST /anulaciones`.
+          schema: { type: string }
+        - name: type
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [xml, cdr]
+        - $ref: '#/components/parameters/RucQuery'
+        - $ref: '#/components/parameters/XRucHeader'
+      responses:
+        '200':
+          description: El archivo, como adjunto.
+          content:
+            application/xml:
+              schema: { type: string }
+            application/zip:
+              schema: { type: string, contentMediaType: application/zip }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Anulación no encontrada o archivo aún no disponible.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Falta el RUC.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
   /guias:
     post:
       operationId: emitDispatchGuide
@@ -1517,6 +1568,57 @@ paths:
           $ref: '#/components/responses/RateLimited'
         '500':
           $ref: '#/components/responses/ServerErrorOrRateLimit'
+
+  /guias/{external_id}/{type}:
+    get:
+      operationId: downloadDispatchGuideFile
+      tags: [Guías de remisión]
+      summary: Descargar PDF, XML o CDR de una guía
+      description: |
+        Descarga el PDF (A4), el XML firmado o el CDR (ZIP de SUNAT) de la guía. No consume crédito.
+        El PDF y el XML existen desde que la guía se genera; el CDR solo cuando SUNAT la aceptó
+        (si falta, consulta `GET /guias/{external_id}/status` y reintenta). Si tu cuenta tiene
+        varios RUC, indica el emisor con `?ruc=` o el header `X-RUC`.
+      parameters:
+        - $ref: '#/components/parameters/ExternalId'
+        - name: type
+          in: path
+          required: true
+          description: Archivo a descargar.
+          schema:
+            type: string
+            enum: [pdf, xml, cdr]
+        - $ref: '#/components/parameters/RucQuery'
+        - $ref: '#/components/parameters/XRucHeader'
+      responses:
+        '200':
+          description: El archivo, como adjunto.
+          content:
+            application/pdf:
+              schema: { type: string, contentMediaType: application/pdf }
+            application/xml:
+              schema: { type: string }
+            application/zip:
+              schema: { type: string, contentMediaType: application/zip }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/RucForbidden'
+        '404':
+          description: Guía no encontrada, o PDF/XML/CDR inexistente en el servidor.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example: { success: false, message: 'El CDR de esta guía no está disponible todavía. Consulta GET /guias/{external_id}/status y vuelve a intentar.', codigo: NO_ENCONTRADO, reintentable: false }
+        '422':
+          description: Falta el RUC.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /rucs:
     get:
@@ -4133,9 +4235,16 @@ components:
         external_id: { type: string, format: uuid }
         estado:
           $ref: '#/components/schemas/EstadoCodigo'
+        links:
+          type: object
+          description: Descarga de los archivos de la guía (`GET /guias/{external_id}/{type}`, con tu `X-API-Key`).
+          properties:
+            xml: { type: string, format: uri }
+            pdf: { type: string, format: uri }
+            cdr: { type: string, format: uri }
         sunat:
           type: [object, "null"]
-          description: Respuesta cruda de la consulta del ticket GRE a SUNAT.
+          description: Respuesta cruda de la consulta del ticket GRE a SUNAT. Sus `links` son los mismos de arriba.
 
     # ───────────── Herramientas (/calcular, /catalogos) ─────────────
     CalculateRequest:

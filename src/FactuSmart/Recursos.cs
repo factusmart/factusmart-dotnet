@@ -167,6 +167,18 @@ namespace FactuSmart
         /// <summary>GET /anulaciones/{ticket}/status.</summary>
         public async Task<JsonElement> EstadoAsync(string ticket, OpcionesRuc? opciones = null, CancellationToken cancellationToken = default)
             => await _c.JsonAsync(new FactuSmartClient.Peticion("GET", $"/anulaciones/{FactuSmartClient.Id(ticket, "el ticket de la anulación")}/status") { Query = { ["ruc"] = _c.RucDe(opciones) }, Reintentable = true }, cancellationToken).ConfigureAwait(false);
+
+        /// <summary>
+        /// GET /anulaciones/{ticket}/{xml|cdr} — devuelve los bytes del XML enviado o del CDR (ZIP de SUNAT).
+        /// Sin PDF. El CDR existe cuando SUNAT ya respondió; si no, <see cref="NoEncontrado"/>.
+        /// </summary>
+        public async Task<byte[]> DescargarAsync(string ticket, string tipo, OpcionesRuc? opciones = null, CancellationToken cancellationToken = default)
+        {
+            if (tipo != "xml" && tipo != "cdr")
+                throw new FactuSmartException($"Tipo de archivo inválido \"{tipo}\": usa \"xml\" o \"cdr\" (las anulaciones no tienen PDF).");
+            var p = new FactuSmartClient.Peticion("GET", $"/anulaciones/{FactuSmartClient.Id(ticket, "el ticket de la anulación")}/{tipo}") { Query = { ["ruc"] = _c.RucDe(opciones) }, Reintentable = true };
+            return await _c.BytesAsync(p, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     /// <summary><c>cliente.Guias</c>: guías de remisión (GRE 2.0).</summary>
@@ -190,6 +202,18 @@ namespace FactuSmart
         /// <summary>GET /guias/{external_id}/status.</summary>
         public async Task<JsonElement> EstadoAsync(string externalId, OpcionesRuc? opciones = null, CancellationToken cancellationToken = default)
             => await _c.JsonAsync(new FactuSmartClient.Peticion("GET", $"/guias/{FactuSmartClient.Id(externalId, "el external_id de la guía")}/status") { Query = { ["ruc"] = _c.RucDe(opciones) }, Reintentable = true }, cancellationToken).ConfigureAwait(false);
+
+        /// <summary>
+        /// GET /guias/{external_id}/{pdf|xml|cdr} — devuelve los bytes del PDF (A4), el XML firmado o el CDR.
+        /// El CDR existe solo cuando SUNAT aceptó la guía; si no, <see cref="NoEncontrado"/>.
+        /// </summary>
+        public async Task<byte[]> DescargarAsync(string externalId, string tipo, OpcionesRuc? opciones = null, CancellationToken cancellationToken = default)
+        {
+            if (tipo != "pdf" && tipo != "xml" && tipo != "cdr")
+                throw new FactuSmartException($"Tipo de archivo inválido \"{tipo}\": usa \"pdf\", \"xml\" o \"cdr\".");
+            var p = new FactuSmartClient.Peticion("GET", $"/guias/{FactuSmartClient.Id(externalId, "el external_id de la guía")}/{tipo}") { Query = { ["ruc"] = _c.RucDe(opciones) }, Reintentable = true };
+            return await _c.BytesAsync(p, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     /// <summary><c>cliente.Rucs</c>: gestión de los RUCs de la cuenta (nunca se les agrega el RUC emisor).</summary>

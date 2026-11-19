@@ -11,12 +11,12 @@ IGV y los totales, consulta los catálogos SUNAT, y descarga el PDF, el XML firm
 
 ## Instalar
 
-Pronto en NuGet. Mientras tanto, descarga `FactuSmart.0.5.0.nupkg` desde la release
-[v0.5.0 en GitHub](https://github.com/factusmart/factusmart-dotnet/releases/tag/v0.5.0), guárdalo en una
+Pronto en NuGet. Mientras tanto, descarga `FactuSmart.0.6.0.nupkg` desde la release
+[v0.6.0 en GitHub](https://github.com/factusmart/factusmart-dotnet/releases/tag/v0.6.0), guárdalo en una
 carpeta (por ejemplo `C:\paquetes`) e instálalo desde ahí:
 
 ```bash
-dotnet add package FactuSmart --version 0.5.0 --source C:\paquetes
+dotnet add package FactuSmart --version 0.6.0 --source C:\paquetes
 ```
 
 `--source` es la carpeta donde guardaste el `.nupkg`, no el archivo.
@@ -108,6 +108,7 @@ Todos devuelven `Task<JsonElement>` (salvo `DescargarAsync`, las consultas RUC/D
 | `fs.Comprobantes.CalcularAsync(items, new OpcionesCalculo { PorcentajeIgv = 10.5m }?)` | `POST /calcular` | objeto (`items`, `totales`) |
 | `fs.Anulaciones.CrearAsync(datos, opciones?)` | `POST /anulaciones` | objeto (`tipo`, `identificador`, `ticket`) |
 | `fs.Anulaciones.EstadoAsync(ticket, opciones?)` | `GET /anulaciones/{ticket}/status` | objeto (`tipo`, `estado`, `documentos`) |
+| `fs.Anulaciones.DescargarAsync(ticket, "xml" \| "cdr", opciones?)` | `GET /anulaciones/{ticket}/{tipo}` | **`byte[]`** |
 | `fs.Catalogos.ListarAsync(opciones?)` | `GET /catalogos` | objeto (`catalogos`, `nota`) |
 | `fs.Catalogos.ConsultarAsync(nombre, new OpcionesCatalogo { Q, Ruc }?)` | `GET /catalogos/{nombre}` | objeto (`catalogo`, `total`, `datos`) |
 | `fs.Catalogos.BuscarProductoSunatAsync(q, limite: 10?, nivel: "producto"?, opciones?)` | `GET /catalogos/productos-sunat` | objeto (`total`, `hay_mas`, `datos`) |
@@ -115,6 +116,7 @@ Todos devuelven `Task<JsonElement>` (salvo `DescargarAsync`, las consultas RUC/D
 | `fs.Establecimientos.CrearAsync(datos, opciones?)` | `POST /establecimientos` | objeto (`message`, `establecimiento`) |
 | `fs.Guias.EmitirAsync(datos, opciones?)` | `POST /guias` | objeto (revisa `enviado`) |
 | `fs.Guias.EstadoAsync(externalId, opciones?)` | `GET /guias/{id}/status` | objeto |
+| `fs.Guias.DescargarAsync(externalId, "pdf" \| "xml" \| "cdr", opciones?)` | `GET /guias/{id}/{tipo}` | **`byte[]`** |
 | `fs.Rucs.ListarAsync()` | `GET /rucs` | objeto |
 | `fs.Rucs.CrearAsync(new { ruc, empresa, correo, clave })` | `POST /rucs` | objeto (`ya_existia`) |
 | `fs.Rucs.ActivarAsync(ruc, activo)` | `PATCH /rucs/{ruc}/activation` | objeto |
@@ -150,6 +152,27 @@ var t58 = await fs.Comprobantes.DescargarAsync(externalId, "pdf", formato: "tick
 
 Un `formato` con `"xml"`/`"cdr"` o fuera de la lista lanza `ErrorDeValidacion` (422, `Codigo`
 `DATOS_INVALIDOS`, `Campos["formato"]`) **sin hacer la petición**. No cambia el PDF que recibe tu cliente.
+
+**Guías y anulaciones** (desde 0.6.0):
+
+```csharp
+var guiaPdf = await fs.Guias.DescargarAsync(guiaId, "pdf");        // también "xml" (firmado) y "cdr"
+var bajaCdr = await fs.Anulaciones.DescargarAsync(ticket, "cdr");  // "xml" (el enviado) o "cdr" (ZIP); sin PDF
+```
+
+El CDR de una guía solo existe cuando SUNAT la aceptó, y el de una anulación cuando SUNAT respondió el
+ticket; si aún no está, se lanza `NoEncontrado` (`Codigo` = `NO_ENCONTRADO`): consulta `EstadoAsync` y
+vuelve a intentar.
+
+**`links` en las respuestas:** todo comprobante que devuelve el API (`EmitirAsync`, `ListarAsync`,
+`ConsultarAsync`, `ReenviarAsync`, `ConsultarSunatAsync`, `HistorialAsync`) trae `links` con `pdf`,
+`pdf_ticket`, `xml` y `cdr`; `Guias.EmitirAsync` (dentro de `envio`) y `Guias.EstadoAsync` traen `links` con
+`xml`, `pdf` y `cdr`; `Anulaciones.CrearAsync` y `Anulaciones.EstadoAsync` traen `links` con `xml` y `cdr`.
+Son URLs del API: se piden con tu `X-API-Key` (o usa los métodos `DescargarAsync`).
+
+```csharp
+var urlPdf = r.GetProperty("links").GetProperty("pdf").GetString();
+```
 
 ### Anular facturas y boletas
 
