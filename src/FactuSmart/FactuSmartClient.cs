@@ -21,7 +21,12 @@ namespace FactuSmart
     /// </summary>
     public sealed class FactuSmartClient : IDisposable
     {
-        public const string Version = "0.7.0";
+        public const string Version = "0.8.0";
+
+        /// <summary>URL base única del API para las llaves de formato nuevo (<c>fs_live_…</c> / <c>fs_test_…</c> con la cuenta).</summary>
+        public const string UrlBasePredeterminada = "https://app.factusmart.pe/api/v1/issuer";
+
+        private static readonly Regex LlaveNueva = new Regex("^fs_(live|test)_A[0-9A-HJKMNP-TV-Z]{11}_[A-Za-z0-9]{32,128}$", RegexOptions.CultureInvariant);
 
         private static readonly TimeSpan EsperaMaxima = TimeSpan.FromSeconds(60);
         private static readonly Regex FirmaHex = new Regex("^[0-9a-f]{64}$", RegexOptions.CultureInvariant);
@@ -57,19 +62,27 @@ namespace FactuSmart
         /// <summary>/establecimientos (anexos).</summary>
         public RecursoEstablecimientos Establecimientos { get; }
 
+        /// <summary><c>true</c> si la llave es de formato nuevo (no necesita <see cref="FactuSmartOptions.BaseUrl"/>).</summary>
+        internal static bool EsLlaveNueva(string? apiKey) => apiKey != null && LlaveNueva.IsMatch(apiKey.Trim());
+
         public FactuSmartClient(FactuSmartOptions opciones)
         {
             if (opciones == null)
-                throw new FactuSmartException("Pasa las opciones del cliente: new FactuSmartClient(new FactuSmartOptions { ApiKey, BaseUrl, Ruc }).");
+                throw new FactuSmartException("Pasa las opciones del cliente: new FactuSmartClient(new FactuSmartOptions { ApiKey, Ruc }).");
             if (string.IsNullOrWhiteSpace(opciones.ApiKey))
                 throw new FactuSmartException("Falta ApiKey: es la API key de tu panel de integrador (pestaña Configuración).");
-            if (string.IsNullOrWhiteSpace(opciones.BaseUrl))
-                throw new FactuSmartException("Falta BaseUrl: copia la \"URL base de la API\" de tu panel de integrador (ej. https://s2.factusmart.pe/api/v1/issuer).");
+            var baseUrl = opciones.BaseUrl;
+            if (string.IsNullOrWhiteSpace(baseUrl))
+            {
+                if (!EsLlaveNueva(opciones.ApiKey))
+                    throw new FactuSmartException("Falta BaseUrl: tu llave es del formato anterior; copia la \"URL base de la API\" de tu panel de integrador, o pide tu llave nueva (fs_live_…) en el panel y no necesitarás BaseUrl.");
+                baseUrl = UrlBasePredeterminada;
+            }
             if (opciones.Timeout <= TimeSpan.Zero)
                 throw new FactuSmartException("Timeout debe ser mayor que cero.");
 
             ApiKey = opciones.ApiKey.Trim();
-            BaseUrl = opciones.BaseUrl.Trim().TrimEnd('/');
+            BaseUrl = baseUrl!.Trim().TrimEnd('/');
             Ruc = string.IsNullOrWhiteSpace(opciones.Ruc) ? null : opciones.Ruc!.Trim();
             Timeout = opciones.Timeout;
             MaxReintentos = Math.Max(0, opciones.MaxReintentos);

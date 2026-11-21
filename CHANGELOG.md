@@ -1,5 +1,21 @@
 # Cambios
 
+## 0.8.0 — 2026-11-21
+
+`BaseUrl` ahora es opcional: todas las cuentas con llave de formato nuevo se atienden en una sola dirección.
+
+- Sin `BaseUrl` y con llave nueva (`fs_live_…` / `fs_test_…` con la cuenta) se usa
+  `https://app.factusmart.pe/api/v1/issuer` (`FactuSmartClient.UrlBasePredeterminada`).
+- Sin `BaseUrl` y con llave del formato anterior, el constructor lanza `FactuSmartException` como antes, con
+  un mensaje que explica qué hacer (copiar la URL del panel o pedir la llave nueva).
+- Si pasas `BaseUrl`, se respeta tal cual.
+- Ejemplos y documentación apuntan a `https://app.factusmart.pe/api/v1/issuer`.
+- Instrucciones de instalación apuntan a `FactuSmart.0.8.0.nupkg` (release v0.8.0).
+
+```csharp
+var fs = new FactuSmartClient(new FactuSmartOptions { ApiKey = "fs_live_…", Ruc = "20100070970" });
+```
+
 ## 0.7.0 — 2026-11-19
 
 Reenvío de guías a SUNAT y código de error para notas de crédito que exceden el comprobante.

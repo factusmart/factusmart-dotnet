@@ -11,12 +11,12 @@ IGV y los totales, consulta los catálogos SUNAT, y descarga el PDF, el XML firm
 
 ## Instalar
 
-Pronto en NuGet. Mientras tanto, descarga `FactuSmart.0.7.0.nupkg` desde la release
-[v0.7.0 en GitHub](https://github.com/factusmart/factusmart-dotnet/releases/tag/v0.7.0), guárdalo en una
+Pronto en NuGet. Mientras tanto, descarga `FactuSmart.0.8.0.nupkg` desde la release
+[v0.8.0 en GitHub](https://github.com/factusmart/factusmart-dotnet/releases/tag/v0.8.0), guárdalo en una
 carpeta (por ejemplo `C:\paquetes`) e instálalo desde ahí:
 
 ```bash
-dotnet add package FactuSmart --version 0.7.0 --source C:\paquetes
+dotnet add package FactuSmart --version 0.8.0 --source C:\paquetes
 ```
 
 `--source` es la carpeta donde guardaste el `.nupkg`, no el archivo.
@@ -26,7 +26,7 @@ dotnet add package FactuSmart --version 0.7.0 --source C:\paquetes
 ```csharp
 using FactuSmart;
 
-var fs = new FactuSmartClient(new FactuSmartOptions { ApiKey = "TU_API_KEY", BaseUrl = "https://TU_URL_BASE/api/v1/issuer", Ruc = "20100070970" });
+var fs = new FactuSmartClient(new FactuSmartOptions { ApiKey = "fs_live_TU_LLAVE", Ruc = "20100070970" });
 
 var calc = FactuSmartClient.CalcularComprobante(new[] {
     new { descripcion = "Servicio de consultoría", cantidad = 1, valor_unitario = 100m, afectacion = "10" },
@@ -41,8 +41,12 @@ var r = await fs.Comprobantes.EmitirAsync(new {
 Console.WriteLine($"{r.GetProperty("aceptado_por_sunat")} {r.GetProperty("serie_numero")}");
 ```
 
-`BaseUrl` **no es igual para todas las cuentas**: cada cuenta vive en un servidor distinto. Cópiala
-de tu panel de integrador (pestaña Configuración, "URL base de la API").
+Con una llave de formato nuevo (`fs_live_…` / `fs_test_…`) no necesitas `BaseUrl`: el SDK usa
+`https://app.factusmart.pe/api/v1/issuer`.
+
+> **Llave del formato anterior:** sigue funcionando, pero solo contra la URL de su servidor. Agrega
+> `BaseUrl = "…"` con la "URL base de la API" de tu panel de integrador (pestaña Configuración), o pide
+> tu llave nueva en el panel y quita `BaseUrl`.
 
 ### Datos en español, tal cual el API
 
@@ -75,14 +79,14 @@ modo prueba (SUNAT beta, sin validez fiscal).
 | Opción | Obligatoria | Default | Nota |
 |---|---|---|---|
 | `ApiKey` | sí | — | Va en el header `X-API-Key`. |
-| `BaseUrl` | sí | — | URL base de tu servidor (sin barra final; si la pones, se quita). |
+| `BaseUrl` | solo con llave antigua | `https://app.factusmart.pe/api/v1/issuer` (llave nueva) | Si la pones, se respeta tal cual (la barra final se quita). |
 | `Ruc` | no | — | RUC emisor por defecto. Se cambia por llamada con `new OpcionesRuc { Ruc = "..." }`. |
 | `Timeout` | no | 60 s | `TimeSpan` por petición (SUNAT a veces tarda). |
 | `MaxReintentos` | no | `3` | Ver "Reintentos e idempotencia". |
 | `VerificarSsl` | no | `true` | `false` **solo** para pruebas locales con certificado propio. |
 | `HttpClient` | no | uno propio | Inyecta el tuyo (ej. de `IHttpClientFactory`). Con él, `VerificarSsl` se ignora: configúralo en tu handler. |
 
-Si falta `ApiKey` o `BaseUrl`, el constructor lanza `FactuSmartException` con un mensaje claro.
+Si falta `ApiKey`, o falta `BaseUrl` con una llave del formato anterior, el constructor lanza `FactuSmartException` con un mensaje claro.
 `FactuSmartClient` es `IDisposable` (libera el `HttpClient` solo si lo creó él). Créalo **una vez**
 y reúsalo (por ejemplo como singleton): es seguro usarlo desde varios hilos.
 

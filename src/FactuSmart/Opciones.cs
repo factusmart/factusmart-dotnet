@@ -5,13 +5,17 @@ using System.Threading.Tasks;
 
 namespace FactuSmart
 {
-    /// <summary>Opciones del cliente. <see cref="ApiKey"/> y <see cref="BaseUrl"/> son obligatorias.</summary>
+    /// <summary>Opciones del cliente. <see cref="ApiKey"/> es obligatoria; <see cref="BaseUrl"/> solo con llaves del formato anterior.</summary>
     public class FactuSmartOptions
     {
         /// <summary>API key de la cuenta (header <c>X-API-Key</c>). Obligatoria.</summary>
         public string ApiKey { get; set; } = "";
 
-        /// <summary>URL base de tu servidor, ej. <c>https://s2.factusmart.pe/api/v1/issuer</c>. Obligatoria (no hay dominio único).</summary>
+        /// <summary>
+        /// URL base del API. Opcional: si no la pones y tu llave es de formato nuevo (<c>fs_live_…</c>), se usa
+        /// <c>https://app.factusmart.pe/api/v1/issuer</c>. Con una llave del formato anterior es obligatoria: copia la
+        /// "URL base de la API" de tu panel de integrador. Si la pones, se respeta tal cual.
+        /// </summary>
         public string BaseUrl { get; set; } = "";
 
         /// <summary>RUC emisor por defecto. Se puede cambiar en cada llamada con <see cref="OpcionesRuc.Ruc"/>.</summary>

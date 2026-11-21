@@ -51,6 +51,48 @@ namespace FactuSmart.Tests
             }
         }
 
+        // ───── 0.8.0: BaseUrl opcional con llave nueva ─────
+
+        private const string LlaveNueva = "fs_live_A0123456789K_abcdefghijABCDEFGHIJ0123456789xy";
+
+        [Fact]
+        public async Task Llave_nueva_sin_BaseUrl_usa_app()
+        {
+            using (var c = new FactuSmartClient(new FactuSmartOptions { ApiKey = LlaveNueva }))
+                Assert.Equal("https://app.factusmart.pe/api/v1/issuer", c.BaseUrl);
+            using (var c = new FactuSmartClient(new FactuSmartOptions { ApiKey = "fs_test_AZZZZZZZZZZZ_" + new string('a', 128), BaseUrl = "  " }))
+                Assert.Equal(FactuSmartClient.UrlBasePredeterminada, c.BaseUrl);
+
+            var m = new ManejadorFalso(R(200, new { success = true }));
+            using (var c = new FactuSmartClient(new FactuSmartOptions { ApiKey = LlaveNueva, HttpClient = new HttpClient(m) }))
+            {
+                await c.RaizAsync();
+                Assert.StartsWith("https://app.factusmart.pe/api/v1/issuer/", m.Llamadas[0].Url.ToString());
+            }
+        }
+
+        [Theory]
+        [InlineData("x")]
+        [InlineData("fs_test_abc123")]
+        [InlineData("fs_live_a0123456789K_abcdefghijABCDEFGHIJ0123456789xy")]
+        [InlineData("fs_live_A0123456789I_abcdefghijABCDEFGHIJ0123456789xy")]
+        [InlineData("fs_live_A0123456789K_corta")]
+        public void Llave_antigua_sin_BaseUrl_lanza_error(string llave)
+        {
+            var e = Assert.Throws<FactuSmartException>(() => new FactuSmartClient(new FactuSmartOptions { ApiKey = llave }));
+            Assert.StartsWith("Falta BaseUrl: tu llave es del formato anterior", e.Mensaje);
+            Assert.Contains("fs_live_", e.Mensaje);
+        }
+
+        [Fact]
+        public void BaseUrl_explicito_se_respeta()
+        {
+            using (var c = new FactuSmartClient(new FactuSmartOptions { ApiKey = LlaveNueva, BaseUrl = "https://s2.factusmart.pe/api/v1/issuer/" }))
+                Assert.Equal("https://s2.factusmart.pe/api/v1/issuer", c.BaseUrl);
+            using (var c = new FactuSmartClient(new FactuSmartOptions { ApiKey = "antigua", BaseUrl = Base }))
+                Assert.Equal(Base, c.BaseUrl);
+        }
+
         // ───── Cabeceras, RUC y defaults ─────
 
         [Fact]
